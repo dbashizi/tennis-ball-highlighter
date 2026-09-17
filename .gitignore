@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# Media and model artifacts (never commit footage)
+data/
+*.mp4
+*.webm
+*.mkv
+*.pt
+*.pth
+*.onnx
+
+# Local state
+*.sqlite3
+*.db
+.DS_Store
