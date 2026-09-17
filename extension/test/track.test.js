@@ -111,19 +111,31 @@ test("sampleTrack: gap exactly 2.5/fps still interpolates", () => {
   assert.ok(Math.abs(s.x - 0.25) < 1e-6);
 });
 
-test("sampleTrack: gap above 2.5/fps uses nearest within 1/fps, else nothing", () => {
+test("sampleTrack: gap above 2.5/fps uses nearest only within 0.5/fps (same frame)", () => {
   const tr = parseTrack(doc([row(10.0, 0.2), row(10.06, 0.8)]));
   const s = createSample();
-  assert.equal(sampleTrack(tr, 10.015, s), true);
+  assert.equal(sampleTrack(tr, 10.005, s), true);
   assert.equal(s.mode, "nearest");
   assert.equal(s.row, 0);
   assert.ok(Math.abs(s.x - 0.2) < 1e-6);
-  assert.equal(sampleTrack(tr, 10.02, s), true, "exactly 1/fps away is still drawn");
-  assert.equal(sampleTrack(tr, 10.045, s), true);
+  assert.equal(sampleTrack(tr, 10.01, s), true, "exactly 0.5/fps away is still drawn");
+  assert.equal(sampleTrack(tr, 10.015, s), false, "0.75/fps away: previously drawn under the 1/fps rule, now hidden");
+  assert.equal(s.mode, "none");
+  assert.equal(sampleTrack(tr, 10.02, s), false, "one frame away is no longer drawn");
+  assert.equal(sampleTrack(tr, 10.055, s), true);
   assert.equal(s.row, 1);
   assert.ok(Math.abs(s.x - 0.8) < 1e-6);
-  assert.equal(sampleTrack(tr, 10.03, s), false, "0.03 s from both rows");
-  assert.equal(s.mode, "none");
+  assert.equal(sampleTrack(tr, 10.03, s), false);
+});
+
+test("sampleTrack: isolated row is drawn on its own frame only (25 fps)", () => {
+  const tr = parseTrack(doc([row(10.0, 0.2), row(10.4, 0.5), row(10.8, 0.9)], { fps: 25 }));
+  const s = createSample();
+  assert.equal(sampleTrack(tr, 10.4, s), true);
+  assert.equal(s.mode, "nearest");
+  assert.equal(sampleTrack(tr, 10.42, s), true, "within 0.02 = 0.5/fps");
+  assert.equal(sampleTrack(tr, 10.44, s), false, "next frame");
+  assert.equal(sampleTrack(tr, 10.36, s), false, "previous frame");
 });
 
 test("sampleTrack: before the first / after the last row", () => {
@@ -131,10 +143,10 @@ test("sampleTrack: before the first / after the last row", () => {
   const s = createSample();
   assert.equal(sampleTrack(tr, 10.99, s), true);
   assert.equal(s.mode, "nearest");
-  assert.equal(sampleTrack(tr, 10.97, s), false);
-  assert.equal(sampleTrack(tr, 11.035, s), true);
+  assert.equal(sampleTrack(tr, 10.985, s), false);
+  assert.equal(sampleTrack(tr, 11.028, s), true);
   assert.equal(s.row, 1);
-  assert.equal(sampleTrack(tr, 11.05, s), false);
+  assert.equal(sampleTrack(tr, 11.035, s), false);
 });
 
 test("sampleTrack: exact row time", () => {
@@ -185,4 +197,78 @@ test("sampleTrack: sequential playback with reused sample matches fresh samples"
     assert.equal(seq.mode, fresh.mode);
     if (a) assert.equal(seq.x, fresh.x);
   }
+});
+
+// ---- streak columns (sl, sa) ------------------------------------------------
+
+const SFIELDS = ["t", "x", "y", "r", "conf", "ring", "flags", "sl", "sa"];
+const srow = (t, x, sl, sa, ring = "#101010") => [t, x, 0.5, 0.01, 0.9, ring, 0, sl, sa];
+
+test("parseTrack: no sl column means circles", () => {
+  const tr = parseTrack(doc([row(10, 0.5)]));
+  assert.equal(tr.sl, null);
+  assert.equal(tr.hasStreak, false);
+  const s = createSample();
+  sampleTrack(tr, 10, s);
+  assert.equal(s.sl, 0);
+  assert.equal(s.sa, 0);
+});
+
+test("parseTrack: sl/sa by name, any order, unknown columns ignored", () => {
+  const fields = ["sa", "extra", "t", "conf", "sl", "x", "y", "r", "flags", "ring", "more"];
+  const tr = parseTrack(doc([[1.25, "zzz", 10, 0.9, 0.012, 0.4, 0.6, 0.003, 2, "#F5F5F5", { a: 1 }]], { fields }));
+  assert.equal(tr.t[0], 10);
+  assert.ok(Math.abs(tr.sl[0] - 0.012) < 1e-7);
+  assert.ok(Math.abs(tr.sa[0] - 1.25) < 1e-6);
+  assert.ok(Math.abs(tr.r[0] - 0.003) < 1e-7);
+  assert.equal(tr.ring[0], "#f5f5f5");
+  assert.equal(tr.flags[0], 2);
+  assert.equal(tr.hasStreak, true);
+});
+
+test("parseTrack: null, missing, negative or junk sl/sa values mean a circle", () => {
+  const tr = parseTrack(doc([
+    [10.0, 0.5, 0.5, 0.01, 0.9, "#101010", 0, null, null],
+    [10.02, 0.5, 0.5, 0.01, 0.9, "#101010", 0],
+    [10.04, 0.5, 0.5, 0.01, 0.9, "#101010", 0, -0.2, "x"],
+    [10.06, 0.5, 0.5, 0.01, 0.9, "#101010", 0, 0.02, 0.5],
+  ], { fields: SFIELDS }));
+  assert.deepEqual(Array.from(tr.sl).map((v) => +v.toFixed(3)), [0, 0, 0, 0.02]);
+  assert.deepEqual(Array.from(tr.sa).map((v) => +v.toFixed(3)), [0, 0, 0, 0.5]);
+  // sl listed but sa not: angle 0
+  const t2 = parseTrack(doc([[10, 0.5, 0.5, 0.01, 0.9, 0.02]], { fields: ["t", "x", "y", "r", "conf", "sl"] }));
+  assert.ok(Math.abs(t2.sl[0] - 0.02) < 1e-7);
+  assert.equal(t2.sa[0], 0);
+  assert.equal(t2.ring[0], "#f5f5f5", "missing ring column gets the default");
+  assert.equal(t2.flags[0], 0);
+  // all-zero sl column
+  assert.equal(parseTrack(doc([srow(10, 0.5, 0, 0)], { fields: SFIELDS })).hasStreak, false);
+});
+
+test("sampleTrack: sl interpolates, sa and ring come from the nearest row", () => {
+  const tr = parseTrack(doc([srow(10.0, 0.2, 0.010, 0.1, "#101010"), srow(10.04, 0.4, 0.030, 2.0, "#f5f5f5")], { fields: SFIELDS }));
+  const s = createSample();
+  assert.equal(sampleTrack(tr, 10.01, s), true);
+  assert.equal(s.mode, "interp");
+  assert.ok(Math.abs(s.sl - 0.015) < 1e-7);
+  assert.ok(Math.abs(s.sa - 0.1) < 1e-6);
+  assert.equal(s.ring, "#101010");
+  sampleTrack(tr, 10.03, s);
+  assert.ok(Math.abs(s.sl - 0.025) < 1e-7);
+  assert.ok(Math.abs(s.sa - 2.0) < 1e-6);
+  assert.equal(s.ring, "#f5f5f5");
+  // nearest-row path carries sl/sa too
+  const t2 = parseTrack(doc([srow(10.0, 0.2, 0.02, -0.7)], { fields: SFIELDS }));
+  assert.equal(sampleTrack(t2, 10.004, s), true);
+  assert.equal(s.mode, "nearest");
+  assert.ok(Math.abs(s.sl - 0.02) < 1e-7);
+  assert.ok(Math.abs(s.sa + 0.7) < 1e-6);
+});
+
+test("sampleTrack: merged old rows (sl 0) next to streak rows", () => {
+  const tr = parseTrack(doc([srow(10.0, 0.2, 0, 0), srow(10.02, 0.3, 0.02, 1.0)], { fields: SFIELDS }));
+  const s = createSample();
+  sampleTrack(tr, 10.005, s);
+  assert.ok(Math.abs(s.sl - 0.005) < 1e-7);
+  assert.equal(s.sa, 0);
 });

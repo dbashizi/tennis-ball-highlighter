@@ -84,8 +84,9 @@ class State:
         if src is not None:
             lo = start if start is not None else -math.inf
             hi = end if end is not None else math.inf
-            idx = {f: src["fields"].index(f) for f in FIELDS}
-            frames = [[r[idx[f]] for f in FIELDS] for r in src["frames"] if lo <= r[idx["t"]] <= hi]
+            fields = list(src["fields"])  # keep every column, including sl/sa
+            ti = fields.index("t")
+            frames = [list(r) for r in src["frames"] if lo <= r[ti] <= hi]
             segs = []
             for s in src["segments"]:
                 a, b = max(s["start"], lo), min(s["end"], hi)
@@ -106,6 +107,7 @@ class State:
                 frames.append([round(t, 3), round(0.5 + 0.3 * math.cos(t * 2), 5), round(0.5 + 0.3 * math.sin(t * 2), 5), 0.006, 0.9, "#f5f5f5", 0])
             segs = [{"start": a, "end": b}]
             video = {"width": 1280, "height": 720, "fps": fps}
+            fields = FIELDS
         return {
             "schema_version": 1,
             "video_id": vid,
@@ -114,7 +116,7 @@ class State:
             "generator": {"name": "mock_service", "version": "0.0.0", "detector": "mock"},
             "video": video,
             "segments": segs,
-            "fields": FIELDS,
+            "fields": fields,
             "frames": frames,
         }
 
@@ -124,8 +126,20 @@ class State:
             self.tracks[vid] = new
             return
         spans = new["segments"]
-        kept = [r for r in old["frames"] if not any(s["start"] <= r[0] <= s["end"] for s in spans)]
-        old["frames"] = sorted(kept + new["frames"], key=lambda r: r[0])
+        # Union of columns; rows lacking one get a default (sl/sa 0 = circle).
+        fields = list(old["fields"]) + [f for f in new["fields"] if f not in old["fields"]]
+        defaults = {"sl": 0.0, "sa": 0.0, "flags": 0, "ring": "#f5f5f5"}
+
+        def remap(rows, src_fields):
+            idx = [src_fields.index(f) if f in src_fields else -1 for f in fields]
+            return [[r[i] if i >= 0 else defaults.get(f) for i, f in zip(idx, fields)] for r in rows]
+
+        ti = old["fields"].index("t")
+        kept = [r for r in old["frames"] if not any(s["start"] <= r[ti] <= s["end"] for s in spans)]
+        rows = remap(kept, old["fields"]) + remap(new["frames"], new["fields"])
+        t_out = fields.index("t")
+        old["fields"] = fields
+        old["frames"] = sorted(rows, key=lambda r: r[t_out])
         old["segments"] = merge_segments(old["segments"] + new["segments"])
         old["created_at"] = new["created_at"]
 

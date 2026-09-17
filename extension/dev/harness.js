@@ -5,7 +5,7 @@ import { Overlay } from "../src/overlay.js";
 import { parseTrack } from "../src/track.js";
 
 const PRESETS = {
-  synthetic: { video: "synthetic/synthetic.mp4", track: "synthetic/synthetic.track.json", offset: 100 },
+  synthetic: { video: "synthetic/synthetic.mp4", track: "synthetic/synthetic.track.json", truth: "synthetic/synthetic.truth.json", offset: 100 },
   real: { video: "/data/clips/YTkyRTsiIaY_359-372.mp4", track: "/samples/YTkyRTsiIaY.track.json", offset: 359 },
 };
 
@@ -21,7 +21,9 @@ const cfg = {
   fallback: q.get("fallback") === "1",
   t: Number(q.get("t") || 0),
   rate: q.get("rate") || "1",
+  truth: q.get("truth") ?? preset.truth ?? (/synthetic\.mp4$/.test(q.get("video") || "") ? "synthetic/synthetic.truth.json" : ""),
 };
+let truth = null;
 const synthetic = /synthetic/.test(cfg.video);
 
 const video = $("video");
@@ -72,14 +74,14 @@ $("ad").addEventListener("change", () => { player.classList.toggle("ad-showing",
 
 const fmtNum = { ratio: (v) => `${v.toFixed(2)}×`, minStroke: (v) => `${v} px`, minConf: (v) => v.toFixed(2) };
 function pushSettings() {
-  const s = { enabled: $("enabled").checked, debug: $("debug").checked };
+  const s = { enabled: $("enabled").checked, debug: $("debug").checked, shape: $("shape").value };
   for (const k of ["ratio", "minStroke", "minConf"]) {
     s[k] = Number($(k).value);
     $(`${k}Out`).textContent = fmtNum[k](s[k]);
   }
   overlay.setSettings(s);
 }
-for (const id of ["enabled", "debug", "ratio", "minStroke", "minConf"]) $(id).addEventListener("input", pushSettings);
+for (const id of ["enabled", "debug", "ratio", "minStroke", "minConf", "shape"]) $(id).addEventListener("input", pushSettings);
 pushSettings();
 
 const FRAME = 1 / 25;
@@ -94,6 +96,13 @@ document.addEventListener("keydown", (e) => {
 });
 video.addEventListener("play", () => { $("play").textContent = "Pause"; });
 video.addEventListener("pause", () => { $("play").textContent = "Play"; });
+video.addEventListener("seeked", () => {
+  if (!synthetic) return;
+  setTimeout(() => {
+    const f = video.paused ? hugCheck() : null;
+    $("o-hug").textContent = f ? `${f.kind}: overshoot ${f.overshoot}, side gap ${f.sideGap}, tip gap ${f.tipGap} px; ${f.covered}/${f.core} core px under ring` : "-";
+  }, 150);
+});
 $("scrub").addEventListener("input", () => { video.currentTime = Number($("scrub").value) * (video.duration || 0); });
 
 function clock(t) {
@@ -107,22 +116,116 @@ const measure = { frames: 0, nearest: 0, sum: 0, max: 0, last: NaN, samples: [] 
 const probe = document.createElement("canvas");
 const pctx = probe.getContext("2d", { willReadFrequently: true });
 
-function detectBall() {
+// Yellowness = R - B: about 160 on the ball, about 0 on grass, lines and crowd.
+// Motion blur mixes the ball with the background, so weight each pixel by its
+// yellowness instead of thresholding colour: the weighted centroid is then the
+// mean ball position over the exposure, which is what the track's x/y is.
+const YELLOW_MIN = 20;
+let frameData = null;
+
+function grabFrame() {
   const w = video.videoWidth;
   const h = video.videoHeight;
   if (!w || !h) return null;
   if (probe.width !== w) { probe.width = w; probe.height = h; }
   pctx.drawImage(video, 0, 0, w, h);
-  const d = pctx.getImageData(0, 0, w, h).data;
-  let sx = 0, sy = 0, n = 0;
+  frameData = pctx.getImageData(0, 0, w, h).data;
+  return frameData;
+}
+
+function detectBall() {
+  const d = grabFrame();
+  if (!d) return null;
+  const w = video.videoWidth;
+  const h = video.videoHeight;
+  let sx = 0, sy = 0, sw = 0;
   for (let y = 40; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const i = (y * w + x) * 4;
-      if (d[i] > 150 && d[i + 1] > 180 && d[i + 2] < 140) { sx += x; sy += y; n++; }
+      const k = d[i] - d[i + 2] - YELLOW_MIN;
+      if (k > 0) { sx += k * x; sy += k * y; sw += k; }
     }
   }
-  // Pixel-index convention, same as the generator (cv2): pixel i is centred at i.
-  return n > 20 ? { x: sx / n, y: sy / n, n } : null;
+  // Edge-based coordinates, like the track: pixel i is centred at i + 0.5.
+  return sw > 500 ? { x: sx / sw + 0.5, y: sy / sw + 0.5, weight: sw } : null;
+}
+
+/**
+ * How well the drawn ring fits the ball on the current (paused) frame, in video px.
+ *
+ * Exact part (needs synthetic.truth.json): the true blur footprint is the union
+ * of discs of radius r at the exposure sub-positions. Against the ring actually
+ * drawn (overlay stats, mapped back to video px):
+ *   overshoot: how far the footprint pokes past the ring's inner edge (<= 0 contained)
+ *   sideGap / tipGap: inner edge minus the footprint's reach across / along the axis
+ *   (about 0 means it hugs).
+ *
+ * Pixel part (codec-noisy): `covered` counts eroded ball-core pixels (strongly
+ * yellow with all 8 neighbours too) under ring ink; the ring must not cover the
+ * ball. `bleed` is the farthest faint-yellow pixel past the inner edge; yuv420
+ * chroma subsampling alone spreads colour 1 to 3 px, so it's a loose sanity bound.
+ */
+function hugCheck() {
+  const last = overlay.stats.last;
+  const d = grabFrame();
+  if (!last || !d) return null;
+  const w = video.videoWidth;
+  const h = video.videoHeight;
+  const L = overlay._layout;
+  const scale = w / L.w; // video px per CSS px
+  const cx = last.cx * scale;
+  const cy = last.cy * scale;
+  const half = last.half * scale;
+  const ux = Math.cos(last.angle);
+  const uy = Math.sin(last.angle);
+  const innerR = (last.radius - last.width / 2) * scale;
+  const axis = (px, py) => {
+    const a = px * ux + py * uy;
+    const t = Math.max(-half, Math.min(half, a));
+    return { a, dist: Math.hypot(px - t * ux, py - t * uy) };
+  };
+  const r2 = (v) => +v.toFixed(2);
+  const out = { t: +overlay.stats.lastTime.toFixed(3), kind: last.kind, innerR: r2(innerR), half: r2(half) };
+
+  if (truth) {
+    const k = Math.round((overlay.stats.lastTime - truth.offset) * truth.fps);
+    const pts = truth.frames[k];
+    if (pts) {
+      let far = 0, side = 0, along = 0;
+      for (const [x, y] of pts) {
+        const q = axis(x - cx, y - cy);
+        far = Math.max(far, q.dist + truth.r);
+        side = Math.max(side, q.dist + truth.r);
+        along = Math.max(along, Math.abs(q.a) + truth.r);
+      }
+      Object.assign(out, { overshoot: r2(far - innerR), sideGap: r2(innerR - side), tipGap: r2(half + innerR - along) });
+    }
+  }
+
+  const ink = overlay.canvas.getContext("2d").getImageData(0, 0, overlay.canvas.width, overlay.canvas.height).data;
+  const cw = overlay.canvas.width;
+  const ch = overlay.canvas.height;
+  const yl = (x, y) => { const i = (y * w + x) * 4; return d[i] - d[i + 2]; };
+  const reach = half + innerR + 6;
+  let covered = 0, core = 0, bleed = 0;
+  for (let y = Math.max(41, Math.floor(cy - reach)); y < Math.min(h - 1, Math.ceil(cy + reach)); y++) {
+    for (let x = Math.max(1, Math.floor(cx - reach)); x < Math.min(w - 1, Math.ceil(cx + reach)); x++) {
+      const k = yl(x, y);
+      if (k < 20) continue;
+      const q = axis(x + 0.5 - cx, y + 0.5 - cy);
+      if (q.dist <= innerR + 6) bleed = Math.max(bleed, q.dist - innerR);
+      if (k < 60) continue;
+      let interior = true;
+      for (let dy = -1; dy <= 1 && interior; dy++) for (let dx = -1; dx <= 1; dx++) if (yl(x + dx, y + dy) < 60) { interior = false; break; }
+      if (!interior) continue;
+      core++;
+      const qx = Math.floor(((x + 0.5) / scale) * L.dpr);
+      const qy = Math.floor(((y + 0.5) / scale) * L.dpr);
+      if (qx >= 0 && qy >= 0 && qx < cw && qy < ch && ink[(qy * cw + qx) * 4 + 3] > 128) covered++;
+    }
+  }
+  Object.assign(out, { core, covered, bleed: r2(bleed) });
+  return out;
 }
 
 // rVFC callbacks run in registration order, which the overlay may change, so
@@ -135,12 +238,7 @@ function pairUp() {
   const { ball } = pendingBall;
   const { last, mode } = pendingDraw;
   pendingBall = pendingDraw = null;
-  // "nearest" frames show a row up to 1/fps old by design (spec rule 1), so
-  // they measure the rule, not sync. Count them separately.
-  if (mode !== "interp") {
-    measure.nearest++;
-    return;
-  }
+  if (mode !== "interp") measure.nearest++; // same-frame rows; counted in the error too
   const L = overlay._layout;
   const scale = video.videoWidth / L.w; // CSS px -> video px
   const err = Math.hypot(last.cx * scale - ball.x, last.cy * scale - ball.y);
@@ -169,12 +267,12 @@ function readout() {
   $("o-t").textContent = Number.isFinite(st.lastTime) ? st.lastTime.toFixed(3) : "-";
   $("o-mode").textContent = st.lastMode || "-";
   $("o-drawn").textContent = `${st.drawn} of ${st.frames} frames`;
-  $("o-ring").textContent = st.last ? `r ${st.last.radius.toFixed(2)} px, w ${st.last.width.toFixed(2)} px, ${st.last.ring}` : "-";
+  $("o-ring").textContent = st.last ? `${st.last.kind}, R ${st.last.radius.toFixed(2)} px, w ${st.last.width.toFixed(2)} px${st.last.kind === "stadium" ? `, half ${st.last.half.toFixed(1)} px, ${(st.last.angle * 180 / Math.PI).toFixed(0)}°` : ""}, ${st.last.ring}` : "-";
   $("o-hidden").textContent = st.hiddenReason || "no";
   if (synthetic && measure.frames) {
     const mean = measure.sum / measure.frames;
     const el = $("o-err");
-    el.textContent = `last ${measure.last.toFixed(2)}, mean ${mean.toFixed(2)}, max ${measure.max.toFixed(2)} px (${measure.frames} interpolated frames; ${measure.nearest} nearest-row frames not counted)`;
+    el.textContent = `last ${measure.last.toFixed(2)}, mean ${mean.toFixed(2)}, max ${measure.max.toFixed(2)} px (${measure.frames} frames, ${measure.nearest} from a same-frame row)`;
     el.className = measure.max < 1.5 ? "good" : "bad";
   } else if (!synthetic) {
     $("o-err").textContent = "synthetic clip only";
@@ -200,6 +298,7 @@ async function load() {
     const res = await fetch(cfg.track, { cache: "no-store" });
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
     const track = parseTrack(await res.json());
+    if (cfg.truth) truth = await fetch(cfg.truth, { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
     overlay.setTrack(track);
     // Registered after the overlay's callback so it sees this frame's stats.
     if (synthetic && !cfg.fallback) video.requestVideoFrameCallback(onFrame);
@@ -209,5 +308,5 @@ async function load() {
   }
 }
 
-window.harness = { overlay, video, measure, cfg, detectBall, resetMeasure: () => Object.assign(measure, { frames: 0, nearest: 0, sum: 0, max: 0, last: NaN, samples: [] }) };
+window.harness = { overlay, video, measure, cfg, detectBall, hugCheck, resetMeasure: () => Object.assign(measure, { frames: 0, nearest: 0, sum: 0, max: 0, last: NaN, samples: [] }) };
 load();

@@ -9,7 +9,12 @@ export const FLAG_HIT = 4;
 // Tolerance for float comparisons of times read from JSON (3-decimal rounding).
 const EPS = 1e-6;
 const HEX_RE = /^#[0-9a-fA-F]{6}$/;
-const REQUIRED_FIELDS = ["t", "x", "y", "r", "conf", "ring", "flags"];
+const REQUIRED_FIELDS = ["t", "x", "y", "r", "conf"];
+// Optional columns. Missing `ring`/`flags` get defaults; missing `sl`/`sa`
+// (or null values in a row) mean a sharp, round ball.
+const OPTIONAL_FIELDS = ["ring", "flags", "sl", "sa"];
+const DEFAULT_FIELDS = ["t", "x", "y", "r", "conf", "ring", "flags"];
+const DEFAULT_RING = "#f5f5f5";
 
 export class TrackError extends Error {}
 
@@ -32,13 +37,15 @@ export function parseTrack(doc) {
   const fps = num(doc.video && doc.video.fps, "video.fps");
   if (fps <= 0) throw new TrackError("video.fps must be positive");
 
-  const fields = Array.isArray(doc.fields) ? doc.fields : REQUIRED_FIELDS;
+  // Columns are looked up by name; unknown columns are ignored.
+  const fields = Array.isArray(doc.fields) ? doc.fields : DEFAULT_FIELDS;
   const col = {};
   for (const name of REQUIRED_FIELDS) {
     const i = fields.indexOf(name);
     if (i < 0) throw new TrackError(`fields is missing "${name}"`);
     col[name] = i;
   }
+  for (const name of OPTIONAL_FIELDS) col[name] = fields.indexOf(name);
 
   const segments = (Array.isArray(doc.segments) ? doc.segments : [])
     .map((s, i) => ({ start: num(s && s.start, `segments[${i}].start`), end: num(s && s.end, `segments[${i}].end`) }))
@@ -63,6 +70,10 @@ export function parseTrack(doc) {
   const conf = new Float32Array(n);
   const flags = new Uint8Array(n);
   const ring = new Array(n);
+  const hasStreak = col.sl >= 0;
+  const sl = hasStreak ? new Float32Array(n) : null;
+  const sa = hasStreak ? new Float32Array(n) : null;
+  let maxSl = 0;
   for (let i = 0; i < n; i++) {
     const row = src[i];
     if (!Array.isArray(row)) throw new TrackError(`frames[${i}] is not an array`);
@@ -71,10 +82,17 @@ export function parseTrack(doc) {
     y[i] = num(row[col.y], `frames[${i}].y`);
     r[i] = num(row[col.r], `frames[${i}].r`);
     conf[i] = num(row[col.conf], `frames[${i}].conf`);
-    const c = row[col.ring];
-    ring[i] = typeof c === "string" && HEX_RE.test(c) ? c.toLowerCase() : "#f5f5f5";
-    const f = row[col.flags];
+    const c = col.ring >= 0 ? row[col.ring] : null;
+    ring[i] = typeof c === "string" && HEX_RE.test(c) ? c.toLowerCase() : DEFAULT_RING;
+    const f = col.flags >= 0 ? row[col.flags] : 0;
     flags[i] = Number.isInteger(f) ? f & 0xff : 0;
+    if (hasStreak) {
+      const l = row[col.sl];
+      const a = col.sa >= 0 ? row[col.sa] : 0;
+      sl[i] = typeof l === "number" && Number.isFinite(l) && l > 0 ? l : 0;
+      sa[i] = typeof a === "number" && Number.isFinite(a) ? a : 0;
+      if (sl[i] > maxSl) maxSl = sl[i];
+    }
   }
 
   return {
@@ -88,6 +106,9 @@ export function parseTrack(doc) {
     segEnd,
     length: n,
     t, x, y, r, conf, ring, flags,
+    sl, // Float32Array or null when the file has no `sl` column
+    sa,
+    hasStreak: hasStreak && maxSl > 0,
   };
 }
 
@@ -121,12 +142,14 @@ export function segmentIndex(track, t) {
 
 export function createSample() {
   // Reused by the renderer every frame: no per-frame allocation.
-  return { x: 0, y: 0, r: 0, conf: 0, ring: "", flags: 0, row: -1, lo: -1, hi: -1, mode: "none", hint: -1 };
+  return { x: 0, y: 0, r: 0, sl: 0, sa: 0, conf: 0, ring: "", flags: 0, row: -1, lo: -1, hi: -1, mode: "none", hint: -1 };
 }
 
 /**
  * Sample the track at time `t` (YouTube timeline, seconds) per the rendering
- * rules. Fills `out` and returns true when something should be drawn.
+ * rules: interpolate x, y, r, sl (and conf) between rows at most 2.5/fps
+ * apart; otherwise use the nearest row only if it is within 0.5/fps (the same
+ * frame). `ring`, `sa` and `flags` come from the nearest row. Fills `out` and returns true when something should be drawn.
  * `out.mode` is "interp" | "nearest" | "none" | "outside" | "lowconf".
  *
  * `minConf` hides rows whose (interpolated) confidence is below it.
@@ -147,7 +170,7 @@ export function sampleTrack(track, t, out, minConf = 0.5) {
   out.hi = hi;
 
   const maxGap = 2.5 / track.fps;
-  const maxNear = 1 / track.fps;
+  const maxNear = 0.5 / track.fps;
 
   if (hasLo && hasHi && ts[hi] - ts[lo] <= maxGap + EPS) {
     const span = ts[hi] - ts[lo];
@@ -158,6 +181,12 @@ export function sampleTrack(track, t, out, minConf = 0.5) {
     out.r = track.r[lo] * b + track.r[hi] * a;
     out.conf = track.conf[lo] * b + track.conf[hi] * a;
     const near = a <= 0.5 ? lo : hi;
+    if (track.sl) {
+      out.sl = track.sl[lo] * b + track.sl[hi] * a;
+      out.sa = track.sa[near];
+    } else {
+      out.sl = out.sa = 0;
+    }
     out.row = near;
     out.ring = track.ring[near];
     out.flags = track.flags[near];
@@ -175,6 +204,8 @@ export function sampleTrack(track, t, out, minConf = 0.5) {
     out.x = track.x[near];
     out.y = track.y[near];
     out.r = track.r[near];
+    out.sl = track.sl ? track.sl[near] : 0;
+    out.sa = track.sa ? track.sa[near] : 0;
     out.conf = track.conf[near];
     out.ring = track.ring[near];
     out.flags = track.flags[near];

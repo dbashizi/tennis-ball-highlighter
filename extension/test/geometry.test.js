@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { contentRect, ringGeometry, parseClock, formatClock, defaultRange, videoIdFromUrl } from "../src/geometry.js";
+import { contentRect, ringGeometry, ringShape, traceRing, STADIUM_MIN_RATIO, parseClock, formatClock, defaultRange, videoIdFromUrl } from "../src/geometry.js";
 import { normalizeSettings, DEFAULT_SETTINGS } from "../src/settings.js";
 
 const near = (a, b, eps = 1e-9) => assert.ok(Math.abs(a - b) < eps, `${a} != ${b}`);
@@ -120,8 +120,133 @@ test("normalizeSettings: defaults and clamping", () => {
   assert.equal(s.minConf, 0.7);
   assert.equal(s.debug, true);
   assert.equal(s.autoOffer, true);
+  assert.equal(s.shape, "stadium");
+  assert.equal(normalizeSettings({ shape: "circle" }).shape, "circle");
+  assert.equal(normalizeSettings({ shape: "hexagon" }).shape, "stadium");
   assert.equal(normalizeSettings({ ratio: 1.0 }).ratio, 1.1);
   assert.equal(DEFAULT_SETTINGS.ratio, 1.2);
   assert.equal(DEFAULT_SETTINGS.minStroke, 1.5);
   assert.equal(DEFAULT_SETTINGS.minConf, 0.5);
 });
+
+// ---- stadium ring -------------------------------------------------------------
+
+/** Records a path and flattens it into points (arcs sampled every ~1 degree). */
+function recorder() {
+  const ops = [];
+  return {
+    ops,
+    beginPath: () => ops.push(["begin"]),
+    arc: (x, y, r, a0, a1) => ops.push(["arc", x, y, r, a0, a1]),
+    lineTo: (x, y) => ops.push(["line", x, y]),
+    closePath: () => ops.push(["close"]),
+    points() {
+      const pts = [];
+      let start = null;
+      let last = null;
+      const add = (p) => { if (!start) start = p; if (last) segment(last, p); last = p; };
+      const segment = (p, q) => { for (let i = 1; i <= 20; i++) pts.push([p[0] + (q[0] - p[0]) * i / 20, p[1] + (q[1] - p[1]) * i / 20]); };
+      for (const op of ops) {
+        if (op[0] === "arc") {
+          const [, x, y, r, a0, a1] = op;
+          const n = Math.max(2, Math.ceil(Math.abs(a1 - a0) / (Math.PI / 180)));
+          for (let i = 0; i <= n; i++) {
+            const a = a0 + (a1 - a0) * i / n;
+            const p = [x + r * Math.cos(a), y + r * Math.sin(a)];
+            if (i === 0 && last) segment(last, p); // canvas joins with a line
+            if (!start) start = p;
+            pts.push(p);
+            last = p;
+          }
+        } else if (op[0] === "line") add([op[1], op[2]]);
+        else if (op[0] === "close" && last && start) segment(last, start);
+      }
+      return pts;
+    },
+  };
+}
+
+function distToSegment(p, a, b) {
+  const vx = b[0] - a[0], vy = b[1] - a[1];
+  const L2 = vx * vx + vy * vy;
+  const t = L2 ? Math.max(0, Math.min(1, ((p[0] - a[0]) * vx + (p[1] - a[1]) * vy) / L2)) : 0;
+  return Math.hypot(p[0] - a[0] - t * vx, p[1] - a[1] - t * vy);
+}
+
+test("ringShape: threshold sl >= 0.5 r picks the stadium", () => {
+  assert.equal(STADIUM_MIN_RATIO, 0.5);
+  assert.equal(ringShape(10, 4.99, 0).kind, "circle");
+  assert.equal(ringShape(10, 4.99, 0).half, 0);
+  assert.equal(ringShape(10, 5, 0).kind, "stadium");
+  assert.equal(ringShape(10, 5, 0).half, 5);
+  assert.equal(ringShape(10, 0, 0).kind, "circle");
+  assert.equal(ringShape(0, 0, 0).kind, "circle");
+  assert.equal(ringShape(10, 40, 1, 1.2, 1.5, "circle").kind, "circle", "circle-only setting");
+});
+
+test("ringShape: same width/clamp maths as the circle, inner edge on the streak", () => {
+  const g = ringShape(20, 60, 0.3);
+  near(g.width, 4);
+  near(g.radius, 22);
+  near(g.radius - g.width / 2, 20);
+  const c = ringShape(5, 20, 0.3); // 0.2 * 5 = 1 px -> clamped to 1.5
+  near(c.width, 1.5);
+  near(c.radius, 5.75);
+  near(c.radius - c.width / 2, 5);
+  assert.equal(c.clamped, true);
+  const r = ringShape(10, 30, 0, 1.5, 2);
+  near(r.width, 5);
+  near(r.radius, 12.5);
+});
+
+test("traceRing: circle is one full arc", () => {
+  const ctx = recorder();
+  traceRing(ctx, 50, 60, ringShape(10, 2, 1));
+  assert.deepEqual(ctx.ops[0], ["begin"]);
+  assert.equal(ctx.ops.length, 2);
+  assert.deepEqual(ctx.ops[1].slice(0, 4), ["arc", 50, 60, 11]);
+  near(ctx.ops[1][5] - ctx.ops[1][4], Math.PI * 2);
+});
+
+for (const sa of [0, Math.PI / 2, Math.PI / 6, -2, 3.0, Math.PI]) {
+  test(`traceRing: stadium outline at sa=${sa.toFixed(3)} is the streak offset by the ring radius`, () => {
+    const rPx = 8, slPx = 30, cx = 100, cy = 70;
+    const g = ringShape(rPx, slPx, sa);
+    const ctx = recorder();
+    traceRing(ctx, cx, cy, g);
+    const kinds = ctx.ops.map((o) => o[0]);
+    assert.deepEqual(kinds, ["begin", "arc", "line", "arc", "close"], "two arcs and two lines in one path");
+    // Cap centres sit on the axis, rotated by sa.
+    const A = [cx - slPx * Math.cos(sa), cy - slPx * Math.sin(sa)];
+    const B = [cx + slPx * Math.cos(sa), cy + slPx * Math.sin(sa)];
+    near(ctx.ops[1][1], B[0], 1e-9);
+    near(ctx.ops[1][2], B[1], 1e-9);
+    near(ctx.ops[3][1], A[0], 1e-9);
+    near(ctx.ops[3][2], A[1], 1e-9);
+    // Each cap sweeps exactly a half turn.
+    near(ctx.ops[1][5] - ctx.ops[1][4], Math.PI);
+    near(ctx.ops[3][5] - ctx.ops[3][4], Math.PI);
+    // Every point of the path is at distance R from the streak's axis segment.
+    const pts = ctx.points();
+    assert.ok(pts.length > 300);
+    for (const p of pts) near(distToSegment(p, A, B), g.radius, 1e-6);
+    // The path reaches both tips (axis ends pushed out by R) and both sides.
+    const tip = (s) => [cx + s * (slPx + g.radius) * Math.cos(sa), cy + s * (slPx + g.radius) * Math.sin(sa)];
+    const side = (s) => [cx - s * g.radius * Math.sin(sa), cy + s * g.radius * Math.cos(sa)];
+    for (const q of [tip(1), tip(-1), side(1), side(-1)]) {
+      const best = Math.min(...pts.map((p) => Math.hypot(p[0] - q[0], p[1] - q[1])));
+      assert.ok(best < 0.2, `path passes near ${q.map((v) => v.toFixed(2))} (closest ${best.toFixed(3)})`);
+    }
+    // The first arc starts where closePath ends the second side (continuity).
+    const a0 = ctx.ops[1][4];
+    const start = [B[0] + g.radius * Math.cos(a0), B[1] + g.radius * Math.sin(a0)];
+    const a1 = ctx.ops[3][5];
+    const end = [A[0] + g.radius * Math.cos(a1), A[1] + g.radius * Math.sin(a1)];
+    near(distToSegment(start, A, B), g.radius, 1e-9);
+    near(Math.hypot(start[0] - end[0] - (B[0] - A[0]), start[1] - end[1] - (B[1] - A[1])), 0, 1e-9);
+    // The explicit lineTo lands on the start of the second arc.
+    const a2 = ctx.ops[3][4];
+    near(ctx.ops[2][1], A[0] + g.radius * Math.cos(a2), 1e-9);
+    near(ctx.ops[2][2], A[1] + g.radius * Math.sin(a2), 1e-9);
+  });
+}

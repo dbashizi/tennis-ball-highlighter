@@ -34,6 +34,59 @@ export function ringGeometry(rPx, ratio = 1.2, minStroke = 1.5, out = {}) {
   return out;
 }
 
+/** Draw a stadium only when the streak half-length is at least this times r. */
+export const STADIUM_MIN_RATIO = 0.5;
+const HALF_PI = Math.PI / 2;
+
+/**
+ * Ring shape for a ball of radius `rPx` blurred into a streak of half-length
+ * `slPx` along direction `sa` (radians, image coordinates, y down).
+ *
+ * Width and clamping are exactly as for the circle (ringGeometry): `radius` is
+ * the stroke-centre offset from the streak's centre line, so the inner edge
+ * lies on the streak outline (r_px) and the outer edge at r_px + width.
+ * `shape` is "stadium" (follow the streak) or "circle" (always a circle of the
+ * same radius at the streak centre). A stadium is used only when
+ * slPx >= STADIUM_MIN_RATIO * rPx.
+ *
+ * Returns (and fills `out`) { radius, width, clamped, kind, half, ux, uy, angle }.
+ */
+export function ringShape(rPx, slPx, sa, ratio = 1.2, minStroke = 1.5, shape = "stadium", out = {}) {
+  ringGeometry(rPx, ratio, minStroke, out);
+  const stadium = shape !== "circle" && slPx > 0 && slPx >= STADIUM_MIN_RATIO * rPx;
+  out.kind = stadium ? "stadium" : "circle";
+  out.half = stadium ? slPx : 0;
+  out.angle = stadium ? sa : 0;
+  out.ux = stadium ? Math.cos(sa) : 1;
+  out.uy = stadium ? Math.sin(sa) : 0;
+  return out;
+}
+
+/**
+ * Trace the ring's centre line as one path (beginPath included, no stroke).
+ * Stadium: an arc around each cap centre plus the two straight sides, rotated
+ * by the streak angle. `ctx` only needs beginPath/arc/lineTo/closePath.
+ */
+export function traceRing(ctx, cx, cy, g) {
+  ctx.beginPath();
+  const R = g.radius;
+  if (g.kind !== "stadium") {
+    ctx.arc(cx, cy, R, 0, Math.PI * 2);
+    return;
+  }
+  const dx = g.half * g.ux;
+  const dy = g.half * g.uy;
+  const a = g.angle;
+  // Cap at the +u end, sweeping through the tip (angle a).
+  ctx.arc(cx + dx, cy + dy, R, a - HALF_PI, a + HALF_PI);
+  // Side along -u, offset by R on the +n side, where n = (-uy, ux).
+  ctx.lineTo(cx - dx - R * g.uy, cy - dy + R * g.ux);
+  // Cap at the -u end, sweeping through its tip (angle a + pi).
+  ctx.arc(cx - dx, cy - dy, R, a + HALF_PI, a + 3 * HALF_PI);
+  // closePath draws the other side back to the first arc's start.
+  ctx.closePath();
+}
+
 export const SETTINGS_LIMITS = {
   ratio: { min: 1.1, max: 1.5, step: 0.05, def: 1.2 },
   minStroke: { min: 0.5, max: 4, step: 0.25, def: 1.5 },

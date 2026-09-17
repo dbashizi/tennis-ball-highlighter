@@ -45,13 +45,22 @@
     <section class="settings" aria-labelledby="settings-h">
       <h2 id="settings-h">Ring</h2>
 
+      <fieldset class="field seg" aria-describedby="shape-help">
+        <legend>Ring shape</legend>
+        <div class="seg-row">
+          <label><input type="radio" name="shape" value="stadium"><span>Follow streak</span></label>
+          <label><input type="radio" name="shape" value="circle"><span>Circle only</span></label>
+        </div>
+        <p class="help" id="shape-help">Follow streak outlines a motion-blurred ball. A circle can cover part of the streak.</p>
+      </fieldset>
+
       <div class="field">
         <div class="label-row">
           <label for="ratio">Ring size</label>
           <output id="ratio-out" for="ratio"></output>
         </div>
         <input type="range" id="ratio" min="1.1" max="1.5" step="0.05" aria-describedby="ratio-help">
-        <p class="help" id="ratio-help">Outer edge relative to the ball. The ring never covers the ball.</p>
+        <p class="help" id="ratio-help">How far the ring's outer edge sits from the ball, as a multiple of its radius.</p>
       </div>
 
       <div class="field">

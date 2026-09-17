@@ -1,6 +1,6 @@
 // Canvas overlay that draws the ball ring on top of a <video>, synced to the
 // presented frame. Used both by the YouTube content script and dev/harness.html.
-import { contentRect, ringGeometry } from "./geometry.js";
+import { contentRect, ringShape, traceRing } from "./geometry.js";
 import { createSample, sampleTrack } from "./track.js";
 import { DEFAULT_SETTINGS } from "./settings.js";
 
@@ -28,8 +28,8 @@ export class Overlay {
     this.track = null;
     this.sample = createSample();
     this.stats = { frames: 0, drawn: 0, lastTime: NaN, lastMode: "", source: "", hiddenReason: "", last: null };
-    this._lastDraw = { cx: 0, cy: 0, radius: 0, width: 0, ring: "" }; // reused every frame
-    this._ring = { radius: 0, width: 0, clamped: false };
+    this._lastDraw = { cx: 0, cy: 0, radius: 0, width: 0, ring: "", kind: "circle", half: 0, angle: 0 }; // reused every frame
+    this._ring = { radius: 0, width: 0, clamped: false, kind: "circle", half: 0, angle: 0, ux: 1, uy: 0 };
 
     this._dirty = true;
     this._lastLayoutCheck = 0;
@@ -285,10 +285,11 @@ export class Overlay {
       const cx = s.x * L.w;
       const cy = s.y * L.h;
       const rPx = s.r * L.w;
-      const g = ringGeometry(rPx, st.ratio, st.minStroke, this._ring);
-      ctx.beginPath();
-      ctx.arc(cx, cy, g.radius, 0, Math.PI * 2);
+      // sl, like r, is a fraction of content width.
+      const g = ringShape(rPx, s.sl * L.w, s.sa, st.ratio, st.minStroke, st.shape, this._ring);
+      traceRing(ctx, cx, cy, g);
       ctx.lineWidth = g.width;
+      ctx.lineJoin = "round";
       if (show) {
         ctx.strokeStyle = s.ring;
         ctx.stroke();
@@ -306,6 +307,9 @@ export class Overlay {
       d.radius = g.radius;
       d.width = g.width;
       d.ring = s.ring;
+      d.kind = g.kind;
+      d.half = g.half;
+      d.angle = g.angle;
       this.stats.last = d;
     } else {
       this.stats.last = null;
@@ -326,6 +330,7 @@ export class Overlay {
     ];
     if (s.row >= 0) {
       lines.push(`x ${s.x.toFixed(4)}  y ${s.y.toFixed(4)}  r ${s.r.toFixed(4)}`);
+      if (tr.sl) lines.push(`sl ${s.sl.toFixed(4)} (${(s.sl / (s.r || 1)).toFixed(2)} r)  sa ${(s.sa * 180 / Math.PI).toFixed(1)}°  ${this.stats.last ? this.stats.last.kind : ""}`);
       lines.push(`conf ${s.conf.toFixed(2)}  ring ${s.ring}  flags ${flags}${show ? "" : "  (hidden)"}`);
       if (s.lo >= 0) lines.push(`row t ${tr.t[s.lo].toFixed(3)}${s.hi >= 0 ? ` .. ${tr.t[s.hi].toFixed(3)}` : ""}  fps ${tr.fps}`);
     }

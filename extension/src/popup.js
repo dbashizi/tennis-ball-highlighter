@@ -44,6 +44,7 @@ function applySettings(s) {
   $("enabled").checked = s.enabled;
   $("autoOffer").checked = s.autoOffer;
   $("debug").checked = s.debug;
+  for (const r of document.querySelectorAll('input[name="shape"]')) r.checked = r.value === s.shape;
   for (const k of ["ratio", "minStroke", "minConf"]) {
     $(k).value = String(s[k]);
     paintRange($(k));
@@ -54,6 +55,9 @@ async function initSettings() {
   applySettings(await loadSettings());
   for (const k of ["enabled", "autoOffer", "debug"]) {
     $(k).addEventListener("change", (e) => saveSettings({ [k]: e.target.checked }).then(() => renderVideo()));
+  }
+  for (const r of document.querySelectorAll('input[name="shape"]')) {
+    r.addEventListener("change", () => { if (r.checked) saveSettings({ shape: r.value }); });
   }
   for (const k of ["ratio", "minStroke", "minConf"]) {
     const input = $(k);

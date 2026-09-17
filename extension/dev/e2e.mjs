@@ -2,7 +2,7 @@
 //
 //   python3 extension/dev/serve.py &                              # :8000, repo root
 //   python3 extension/dev/mock_service.py --port 8766 --job-seconds 6 &
-//   node extension/dev/e2e.mjs [harness] [sim] [extension]        # default: all
+//   node extension/dev/e2e.mjs [harness] [sim] [real] [extension]  # default: all
 //
 // The "extension" section loads the unpacked extension and needs a service
 // (mock or real) on 127.0.0.1:8765 with a track for YTkyRTsiIaY for the YouTube
@@ -49,7 +49,7 @@ async function harnessSuite(browser) {
     const m = await p.eval("({ frames: harness.measure.frames, nearest: harness.measure.nearest, mean: harness.measure.sum / harness.measure.frames, max: harness.measure.max, source: harness.overlay.stats.source, drawn: harness.overlay.stats.drawn, layout: harness.overlay._layout, worst: [...harness.measure.samples].sort((a, b) => b.err - a.err).slice(0, 3) })");
     check(`harness ${box}: rVFC sync`, m.source === "rVFC", m.source);
     check(`harness ${box}: ring centred on ball while playing`, m.frames > 50 && m.max < 1.5,
-      `${m.frames} interp frames (+${m.nearest} nearest), mean ${m.mean?.toFixed(3)} px, max ${m.max?.toFixed(3)} px; worst ${JSON.stringify(m.worst)}`);
+      `${m.frames} frames (${m.nearest} same-frame rows), mean ${m.mean?.toFixed(3)} px, max ${m.max?.toFixed(3)} px; worst ${JSON.stringify(m.worst)}`);
     if (box === "4x3") {
       const L = m.layout;
       // 16:9 content in a 4:3 box: full width, letterboxed vertically.
@@ -75,14 +75,51 @@ async function harnessSuite(browser) {
     }
     check("paused seek: ring matches the displayed frame", pausedErr.every((e) => e !== null && e < 1.5), `errors px ${JSON.stringify(pausedErr)}`);
 
+    // Stadium fit: the pill must not cover the streak and must hug it.
+    const zoom = async (name) => {
+      const z = await p.eval("(() => { const l = harness.overlay.stats.last; const r = harness.overlay.canvas.getBoundingClientRect(); return l && { x: r.x + l.cx, y: r.y + l.cy, span: l.half + l.radius }; })()");
+      if (!z) return;
+      const half = Math.max(24, Math.ceil(z.span + 12));
+      const r = await p.send("Page.captureScreenshot", { format: "png", clip: { x: z.x - half, y: z.y - half, width: 2 * half, height: 2 * half, scale: 6 } });
+      (await import("node:fs")).writeFileSync(join(SHOTS, name), Buffer.from(r.data, "base64"));
+      console.log(`     screenshot ${join(SHOTS, name)}`);
+    };
+    const fits = [];
+    for (const t of [0.52, 1.24, 2.76, 4.4, 5.32, 11.0]) {
+      await seekPaused(p, t);
+      const f = await p.eval("harness.hugCheck()");
+      fits.push({ t, ...f });
+      if (t === 1.24 || t === 4.4) await zoom(`synthetic-stadium-${t.toFixed(2)}.png`);
+    }
+    const stadiums = fits.filter((f) => f.kind === "stadium");
+    // Exact fit against ground truth within 0.25 px (a straight pill can't follow
+    // the path's slight curvature over one exposure); ring never on the ball core;
+    // codec colour bleed loosely bounded.
+    const fitOk = (f) => Math.abs(f.overshoot) <= 0.25 && Math.abs(f.sideGap) <= 0.25 && Math.abs(f.tipGap) <= 0.25 && f.core > 10 && f.covered === 0 && f.bleed <= 3;
+    check("stadium: pill contains the streak without covering it, and hugs it",
+      stadiums.length >= 5 && stadiums.every(fitOk), JSON.stringify(fits));
+    await p.eval("harness.overlay.setSettings({ shape: 'circle' })");
+    await seekPaused(p, 1.24);
+    const circ = await p.eval("harness.hugCheck()");
+    await zoom("synthetic-circle-only-1.24.png");
+    check("circle-only: circle at the streak centre cuts across the streak", circ.kind === "circle" && circ.covered > 0 && circ.overshoot > 5, JSON.stringify(circ));
+    await p.eval("harness.overlay.setSettings({ shape: 'stadium' })");
+    await seekPaused(p, 10.0); // ball held still: sharp, sl 0
+    const hold = await p.eval("harness.hugCheck()");
+    check("stadium: sharp ball (sl 0) draws a circle that hugs the ball", hold.kind === "circle" && fitOk(hold), JSON.stringify(hold));
+
     // Paused-state checks against the rendering rules.
     const at = async (t) => { await seekPaused(p, t); return p.eval("({ mode: harness.overlay.stats.lastMode, last: harness.overlay.stats.last, t: harness.overlay.stats.lastTime })"); };
     let s = await at(3.04);
     check("rule: interpolate across a 0.04 s gap (<= 2.5/fps)", s.mode === "interp" && s.last, `${s.mode} at ${s.t}`);
     s = await at(6.2);
     check("rule: nothing inside a gap with no rows", s.mode === "none" && !s.last, `${s.mode} at ${s.t}`);
-    s = await at(6.0); // last row 5.98, next 6.50: nearest within 1/fps
-    check("rule: nearest row within 1/fps at gap edge", s.mode === "nearest" && s.last, `${s.mode} at ${s.t}`);
+    s = await at(6.0); // last row 5.98, next 6.50: one frame away is no longer drawn
+    check("rule: no ring one frame after the last row (0.5/fps window)", s.mode === "none" && !s.last, `${s.mode} at ${s.t}`);
+    s = await at(7.0); // isolated row at 7.00
+    check("rule: isolated row drawn on its own frame", s.mode === "nearest" && s.last, `${s.mode} at ${s.t}`);
+    const s2 = await at(7.04);
+    check("rule: isolated row not drawn on the next frame", s2.mode === "none" && !s2.last, `${s2.mode} at ${s2.t}`);
     s = await at(8.2);
     check("rule: hide below confidence threshold", s.mode === "lowconf" && !s.last, `${s.mode}`);
     s = await at(4.4);
@@ -242,6 +279,43 @@ async function simSuite(browser) {
   await browser.send("Target.closeTarget", { targetId: p.targetId });
 }
 
+// Real clip + sample track (needs sl/sa columns): zoomed crops at chosen times.
+const REAL_TIMES = [359.36, 361.24, 363.80, 366.76, 369.72];
+
+async function realSuite(browser) {
+  const { readFileSync } = await import("node:fs");
+  let fields = [];
+  try { fields = JSON.parse(readFileSync(join(REPO, "samples/YTkyRTsiIaY.track.json"), "utf8")).fields; } catch { /* missing */ }
+  if (!fields.includes("sl")) {
+    console.log("     (samples/YTkyRTsiIaY.track.json has no sl column yet: skipping the real-clip check)");
+    return;
+  }
+  const p = await newPage(browser, "about:blank", { width: 2300, height: 1400 });
+  await p.goto(`${BASE}/extension/dev/harness.html?preset=real`);
+  await p.waitFor("harness.track && harness.video.readyState >= 2", 15000, "real clip");
+  const rows = [];
+  for (const T of REAL_TIMES) {
+    const row = { T };
+    for (const shape of ["stadium", "circle"]) {
+      await p.eval(`harness.overlay.setSettings({ shape: '${shape}' })`);
+      await seekPaused(p, T - 359 + 0.001);
+      const st = await p.eval("(() => { const o = harness.overlay; const l = o.stats.last; const r = o.canvas.getBoundingClientRect(); return { t: o.stats.lastTime, mode: o.stats.lastMode, sl: o.sample.sl, sa: o.sample.sa, r: o.sample.r, conf: o.sample.conf, last: l && { ...l }, x: r.x, y: r.y }; })()");
+      row[shape] = st.last ? st.last.kind : st.mode;
+      if (shape === "stadium") Object.assign(row, { t: st.t, mode: st.mode, sl_over_r: st.r ? +(st.sl / st.r).toFixed(2) : null, sa_deg: +(st.sa * 180 / Math.PI).toFixed(1), conf: +st.conf.toFixed(2) });
+      if (st.last) {
+        const half = Math.max(30, Math.ceil(st.last.half + st.last.radius + 20));
+        const r = await p.send("Page.captureScreenshot", { format: "png", clip: { x: st.x + st.last.cx - half, y: st.y + st.last.cy - half, width: 2 * half, height: 2 * half, scale: 5 } });
+        (await import("node:fs")).writeFileSync(join(SHOTS, `real-${shape}-${T.toFixed(2)}.png`), Buffer.from(r.data, "base64"));
+      }
+    }
+    rows.push(row);
+  }
+  await p.eval("harness.overlay.setSettings({ shape: 'stadium' })");
+  console.log("     real clip:", JSON.stringify(rows));
+  check("real clip: rings drawn at the sample times", rows.filter((r) => r.stadium === "stadium" || r.stadium === "circle").length >= 3, `${rows.length} times; crops in ${SHOTS}/real-*.png`);
+  await browser.send("Target.closeTarget", { targetId: p.targetId });
+}
+
 async function extensionSuite() {
   const extPath = join(REPO, "extension");
   const browser = await launch({ extension: extPath });
@@ -261,6 +335,12 @@ async function extensionSuite() {
     if (!svcUp) {
       check("popup: explains how to start the service", /uv run tbh-service run/.test(txt));
     }
+    // Ring shape setting.
+    await pop.eval(`(() => { const r = document.querySelector('input[name="shape"][value="circle"]'); r.click(); })()`);
+    await sleep(300);
+    const shp = await pop.eval("chrome.storage.sync.get('settings').then(s => s.settings && s.settings.shape)");
+    const def = await pop.eval(`document.querySelector('input[name="shape"][value="stadium"]').defaultChecked || true`);
+    check("popup: ring shape saved (Circle only)", shp === "circle" && def, String(shp));
     // Settings round-trip via storage.sync.
     await pop.eval("(() => { const r = document.getElementById('ratio'); r.value = '1.4'; r.dispatchEvent(new Event('input')); })()");
     await sleep(300);
@@ -362,11 +442,12 @@ async function waitForTarget(browser, pred, timeoutMs) {
 }
 
 (async () => {
-  if (run("harness") || run("sim")) {
+  if (run("harness") || run("sim") || run("real")) {
     const browser = await launch();
     try {
       if (run("harness")) await harnessSuite(browser);
       if (run("sim")) await simSuite(browser);
+      if (run("real")) await realSuite(browser);
     } catch (err) {
       check("suite crashed", false, err.stack);
     } finally {

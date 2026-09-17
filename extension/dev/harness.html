@@ -104,6 +104,12 @@
       <fieldset>
         <legend>Ring</legend>
         <label class="row"><span><input type="checkbox" id="enabled" checked> Enabled</span></label>
+        <label class="row">Ring shape
+          <select id="shape">
+            <option value="stadium">Follow streak</option>
+            <option value="circle">Circle only</option>
+          </select>
+        </label>
         <label class="row">Size ratio <output id="ratioOut"></output><input type="range" id="ratio" min="1.1" max="1.5" step="0.05" value="1.2"></label>
         <label class="row">Minimum stroke <output id="minStrokeOut"></output><input type="range" id="minStroke" min="0.5" max="4" step="0.25" value="1.5"></label>
         <label class="row">Confidence threshold <output id="minConfOut"></output><input type="range" id="minConf" min="0" max="1" step="0.05" value="0.5"></label>
@@ -121,7 +127,8 @@
           <dt>Drawn</dt><dd id="o-drawn">-</dd>
           <dt>Ring</dt><dd id="o-ring">-</dd>
           <dt>Hidden</dt><dd id="o-hidden">-</dd>
-          <dt>Ball error</dt><dd id="o-err" title="Synthetic clip only: detected yellow-ball centre vs ring centre, in video pixels">-</dd>
+          <dt>Ball error</dt><dd id="o-err" title="Synthetic clip only: weighted yellow-streak centre vs ring centre, in video pixels">-</dd>
+          <dt>Fit</dt><dd id="o-hug" title="Synthetic clip, paused: ball pixels under the ring, overshoot past the inner edge (video px)">-</dd>
         </dl>
       </fieldset>
     </aside>

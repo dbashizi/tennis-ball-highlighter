@@ -10,7 +10,10 @@ export const DEFAULT_SETTINGS = Object.freeze({
   minConf: L.minConf.def,
   debug: false,
   autoOffer: true,
+  shape: "stadium", // "stadium" (follow the streak) | "circle"
 });
+
+export const SHAPES = ["stadium", "circle"];
 
 function numOr(v, def, lim) {
   const n = Number(v);
@@ -27,6 +30,7 @@ export function normalizeSettings(raw) {
     minConf: numOr(s.minConf, DEFAULT_SETTINGS.minConf, L.minConf),
     debug: typeof s.debug === "boolean" ? s.debug : DEFAULT_SETTINGS.debug,
     autoOffer: typeof s.autoOffer === "boolean" ? s.autoOffer : DEFAULT_SETTINGS.autoOffer,
+    shape: SHAPES.includes(s.shape) ? s.shape : DEFAULT_SETTINGS.shape,
   };
 }
 
