@@ -1,6 +1,8 @@
 """Ring colour selection (docs/track-format.md, "Ring colour rule").
 
-1. Take the median colour, in linear RGB, of the annulus 1.3r..2.5r around the ball.
+1. Take the median colour, in linear RGB, of the annulus 1.3r..2.5r around the ball
+   outline. For a motion-blurred ball, that outline is the stadium (streak), so the
+   streak itself is excluded.
    Compute its relative luminance L.
 2. Pick the candidate with the highest WCAG contrast against L. Black and white
    are preferred; magenta wins only if its contrast is at least 1.2x theirs.
@@ -54,10 +56,16 @@ def contrast(l1: float, l2: float) -> float:
 
 
 def annulus_mask(shape: tuple[int, int], cx: float, cy: float, r: float,
-                 inner: float = 1.3, outer: float = 2.5) -> np.ndarray:
+                 inner: float = 1.3, outer: float = 2.5, sl: float = 0.0, sa: float = 0.0) -> np.ndarray:
+    """Pixels whose distance to the ball outline is between inner*r and outer*r.
+
+    The ball is a stadium: the segment centre +- sl along direction sa,
+    thickened by r. With sl = 0 that is the circle of radius r. Distances are
+    measured to the segment, so the streak itself is always excluded.
+    """
     h, w = shape
     yy, xx = np.mgrid[0:h, 0:w]
-    d = np.hypot(xx + 0.5 - cx, yy + 0.5 - cy)
+    d = segment_distance(xx + 0.5, yy + 0.5, cx, cy, sl, sa)
     ri, ro = inner * r, outer * r
     # Keep at least a 1px-wide band so tiny radii still sample something.
     if ro - ri < 1.0:
@@ -65,15 +73,31 @@ def annulus_mask(shape: tuple[int, int], cx: float, cy: float, r: float,
     return (d >= ri) & (d <= ro)
 
 
-def background_luminance(img_bgr: np.ndarray, cx: float, cy: float, r: float) -> float | None:
-    """Median linear-RGB colour of the annulus, as luminance. (cx, cy) are pixel coordinates in img."""
+def segment_distance(px, py, cx, cy, sl: float = 0.0, sa: float = 0.0):
+    """Distance from points to the segment [c - sl*u, c + sl*u] with u = (cos sa, sin sa)."""
+    dx, dy = px - cx, py - cy
+    if sl <= 0:
+        return np.hypot(dx, dy)
+    ux, uy = np.cos(sa), np.sin(sa)
+    t = np.clip(dx * ux + dy * uy, -sl, sl)
+    return np.hypot(dx - t * ux, dy - t * uy)
+
+
+def background_luminance(img_bgr: np.ndarray, cx: float, cy: float, r: float,
+                         sl: float = 0.0, sa: float = 0.0) -> float | None:
+    """Luminance of the median linear-RGB colour of the annulus around the ball outline.
+
+    (cx, cy) are pixel coordinates in img.
+    """
     ro = max(2.5 * r, 1.3 * r + 1.0)
-    x0, x1 = int(max(0, np.floor(cx - ro - 1))), int(min(img_bgr.shape[1], np.ceil(cx + ro + 1)))
-    y0, y1 = int(max(0, np.floor(cy - ro - 1))), int(min(img_bgr.shape[0], np.ceil(cy + ro + 1)))
+    ex = abs(sl * np.cos(sa)) + ro + 1
+    ey = abs(sl * np.sin(sa)) + ro + 1
+    x0, x1 = int(max(0, np.floor(cx - ex))), int(min(img_bgr.shape[1], np.ceil(cx + ex)))
+    y0, y1 = int(max(0, np.floor(cy - ey))), int(min(img_bgr.shape[0], np.ceil(cy + ey)))
     if x1 <= x0 or y1 <= y0:
         return None
     crop = img_bgr[y0:y1, x0:x1]
-    m = annulus_mask(crop.shape[:2], cx - x0, cy - y0, r)
+    m = annulus_mask(crop.shape[:2], cx - x0, cy - y0, r, sl=sl, sa=sa)
     if m.sum() < 4:
         return None
     px = crop[m][:, ::-1].astype(np.float64) / 255.0  # BGR -> RGB

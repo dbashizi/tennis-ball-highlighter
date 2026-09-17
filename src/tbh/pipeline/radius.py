@@ -41,6 +41,9 @@ class BallMeasurement:
     major: float  # half-length along the streak, px
     contrast: float  # peak background difference (0..255 scale)
     weight: float  # 0..1 reliability
+    sl: float = 0.0  # streak half-length: centre to cap centre, px (0 = round)
+    angle: float = 0.0  # streak direction, radians in [0, pi) (ambiguous by pi)
+    elong: float = 1.0  # along/across extent ratio of the loose blob
 
 
 def crop_window(img: np.ndarray, cx: float, cy: float, half: int):
@@ -114,7 +117,52 @@ def measure_ball(frame: np.ndarray, background: np.ndarray, x: float, y: float, 
     # Reliability: contrast over noise, and a compact blob.
     fill = area / max(1.0, np.pi * r * max(major, r))
     weight = float(np.clip((peak / noise - 4.0) / 8.0, 0.0, 1.0) * np.clip(fill, 0.3, 1.0))
-    return BallMeasurement(cxm, cym, float(r), float(major), peak, weight)
+    meas = BallMeasurement(cxm, cym, float(r), float(major), peak, weight)
+    _measure_streak(meas, diff, lab == k, py, px, peak, noise, xx, yy)
+    return meas
+
+
+def _measure_streak(meas: BallMeasurement, diff, tight, py, px, peak, noise, xx, yy,
+                    loose_frac: float = 0.3) -> None:
+    """Streak half-length and direction from a looser mask that includes the faint tail.
+
+    The half-extents along and across the principal axis come from percentiles
+    of the pixel projections. ``sl = along - across``: the blur widens both by
+    the same amount, so the difference is the centre-to-cap-centre distance of a
+    stadium. The centre moves to the streak's midpoint along the axis.
+    """
+    h, w = diff.shape
+    thr = max(loose_frac * peak, 3.0 * noise, 4.0)
+    loose = (diff >= thr).astype(np.uint8)
+    _, llab = cv2.connectedComponents(loose, connectivity=8)
+    k = llab[py, px]
+    m = llab == k
+    ys, xs = np.nonzero(m)
+    if k == 0 or len(xs) < 4 or xs.min() == 0 or ys.min() == 0 or xs.max() == w - 1 or ys.max() == h - 1 \
+            or m.sum() > 12 * max(1, tight.sum()):
+        m = tight  # loose blob merged into something else: fall back to the tight blob
+        ys, xs = np.nonzero(m)
+    xs = xs + 0.5
+    ys = ys + 0.5
+    wts = diff[m]
+    cx = float((xs * wts).sum() / wts.sum())
+    cy = float((ys * wts).sum() / wts.sum())
+    cov = np.cov(np.stack([xs - cx, ys - cy]), aweights=wts) if len(xs) > 2 else np.eye(2)
+    evals, evecs = np.linalg.eigh(cov)
+    ax = evecs[:, 1]  # principal axis
+    along = (xs - cx) * ax[0] + (ys - cy) * ax[1]
+    across = -(xs - cx) * ax[1] + (ys - cy) * ax[0]
+    lo, hi = np.percentile(along, [1.5, 98.5])
+    alo, ahi = np.percentile(across, [1.5, 98.5])
+    half_along = 0.5 * (hi - lo) + 0.5  # + half a pixel for the pixel footprint
+    half_across = 0.5 * (ahi - alo) + 0.5
+    meas.elong = float(half_along / max(half_across, 0.5))
+    meas.sl = float(max(0.0, half_along - half_across))
+    meas.angle = float(np.arctan2(ax[1], ax[0]) % np.pi)
+    if meas.sl > 0:
+        mid = 0.5 * (lo + hi)
+        meas.x = float(cx + mid * ax[0])
+        meas.y = float(cy + mid * ax[1])
 
 
 def median_background(crops: list[np.ndarray]) -> np.ndarray | None:

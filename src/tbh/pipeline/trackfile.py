@@ -11,7 +11,9 @@ from urllib.parse import parse_qs, urlparse
 from tbh import __version__
 
 SCHEMA_VERSION = 1
-FIELDS = ["t", "x", "y", "r", "conf", "ring", "flags"]
+REQUIRED_FIELDS = ["t", "x", "y", "r", "conf", "ring", "flags"]
+OPTIONAL_DEFAULTS = {"sl": 0.0, "sa": 0.0}  # values for rows of files without these columns
+FIELDS = REQUIRED_FIELDS + ["sl", "sa"]  # what this pipeline writes
 FLAG_INTERPOLATED = 1
 FLAG_BOUNCE = 2
 FLAG_HIT = 4
@@ -51,9 +53,24 @@ def now_iso() -> str:
     return _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def make_row(t: float, x: float, y: float, r: float, conf: float, ring: str, flags: int) -> list:
+def make_row(t: float, x: float, y: float, r: float, conf: float, ring: str, flags: int,
+             sl: float = 0.0, sa: float = 0.0) -> list:
+    """A row in ``FIELDS`` order."""
     return [round(float(t), 3), round(float(x), 5), round(float(y), 5), round(float(r), 5),
-            round(float(conf), 2), ring, int(flags)]
+            round(float(conf), 2), ring, int(flags), round(float(sl), 5), round(float(sa), 3)]
+
+
+def column(track: dict, name: str):
+    """Index of a column by name, or None."""
+    f = track.get("fields", [])
+    return f.index(name) if name in f else None
+
+
+def row_dict(track: dict, row: list) -> dict:
+    """A row as {name: value}, with defaults for missing optional columns."""
+    d = dict(OPTIONAL_DEFAULTS)
+    d.update(zip(track["fields"], row))
+    return d
 
 
 def build_track(*, video_id: str, source_url: str | None, width: int, height: int, fps: float,
@@ -71,7 +88,7 @@ def build_track(*, video_id: str, source_url: str | None, width: int, height: in
         "video": {"width": int(width), "height": int(height), "fps": round(float(fps), 6)},
         "segments": merge_segments(segments),
         "fields": list(FIELDS),
-        "frames": sorted(rows, key=lambda r: r[0]),
+        "frames": sorted(rows, key=lambda r: r[FIELDS.index("t")]),
     }
     validate(track)
     return track
@@ -101,19 +118,28 @@ def validate(track: dict) -> None:
         if not (isinstance(s, dict) and isinstance(s.get("start"), (int, float))
                 and isinstance(s.get("end"), (int, float)) and s["end"] >= s["start"] >= 0):
             fail(f"bad segment {s!r}")
-    if track.get("fields") != FIELDS:
-        fail(f"fields must be {FIELDS}")
+    fields = track.get("fields")
+    if not isinstance(fields, list) or not all(isinstance(f, str) for f in fields):
+        fail("fields must be a list of strings")
+    if len(set(fields)) != len(fields):
+        fail("fields must be unique")
+    missing = [f for f in REQUIRED_FIELDS if f not in fields]
+    if missing:
+        fail(f"fields missing: {', '.join(missing)}")
+    ix = {f: fields.index(f) for f in fields}
     frames = track.get("frames")
     if not isinstance(frames, list):
         fail("frames must be a list")
     prev_t = -1.0
     for i, row in enumerate(frames):
-        if not isinstance(row, list) or len(row) != len(FIELDS):
+        if not isinstance(row, list) or len(row) != len(fields):
             fail(f"row {i}: wrong length")
-        t, x, y, r, conf, ring, flags = row
-        for name, val in (("t", t), ("x", x), ("y", y), ("r", r), ("conf", conf)):
+        g = {f: row[ix[f]] for f in fields}
+        for name in ("t", "x", "y", "r", "conf") + tuple(n for n in OPTIONAL_DEFAULTS if n in ix):
+            val = g[name]
             if not isinstance(val, (int, float)) or isinstance(val, bool):
                 fail(f"row {i}: {name} must be a number")
+        t, x, y, r, conf, ring, flags = (g[n] for n in REQUIRED_FIELDS)
         if t < prev_t:
             fail(f"row {i}: rows must be sorted by t")
         prev_t = t
@@ -127,6 +153,10 @@ def validate(track: dict) -> None:
             fail(f"row {i}: ring must be #rrggbb")
         if not isinstance(flags, int) or isinstance(flags, bool) or flags < 0 or flags > 7:
             fail(f"row {i}: flags must be an int bitmask 0..7")
+        if "sl" in ix and not (0 <= g["sl"] < 0.5):
+            fail(f"row {i}: sl out of range")
+        if "sa" in ix and not (-7.0 <= g["sa"] <= 7.0):
+            fail(f"row {i}: sa must be an angle in radians")
         if segs and not any(s["start"] - 1e-6 <= t <= s["end"] + 1e-6 for s in segs):
             fail(f"row {i}: t={t} outside all segments")
 
@@ -142,18 +172,32 @@ def merge_segments(segments: list[dict]) -> list[dict]:
 
 
 def merge(old: dict, new: dict) -> dict:
-    """Merge ``new`` into ``old``: segments are unioned, and old rows inside new segments are replaced."""
+    """Merge ``new`` into ``old``: segments are unioned, and old rows inside new segments are replaced.
+
+    Rows are remapped by column name to ``new``'s fields. Optional columns that
+    the old file lacks get their defaults; unknown old columns are dropped.
+    """
     if old.get("video_id") != new.get("video_id"):
         raise TrackFileError("cannot merge tracks of different videos")
     new_segs = new["segments"]
+    fields = new["fields"]
+    t_old = old["fields"].index("t")
 
     def covered(t):
         return any(s["start"] - 1e-6 <= t <= s["end"] + 1e-6 for s in new_segs)
 
-    kept = [r for r in old["frames"] if not covered(r[0])]
+    kept = []
+    for row in old["frames"]:
+        if covered(row[t_old]):
+            continue
+        d = row_dict(old, row)
+        if any(f not in d for f in fields):
+            raise TrackFileError(f"old track lacks a column needed by the new one: {fields}")
+        kept.append([d[f] for f in fields])
     merged = dict(new)
     merged["segments"] = merge_segments([dict(s) for s in old["segments"]] + [dict(s) for s in new_segs])
-    merged["frames"] = sorted(kept + list(new["frames"]), key=lambda r: r[0])
+    t_new = fields.index("t")
+    merged["frames"] = sorted(kept + list(new["frames"]), key=lambda r: r[t_new])
     validate(merged)
     return merged
 

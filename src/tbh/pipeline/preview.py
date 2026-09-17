@@ -2,13 +2,17 @@
 
 It follows the rendering rules in docs/track-format.md:
 
-1. For time t, linearly interpolate x, y and r between the rows on either side
-   if they are at most 2.5/fps apart. Otherwise use the nearest row within
-   1/fps, or draw nothing. ``ring`` comes from the nearest row.
-2. Draw one ring. Its inner edge is at r_px and its outer edge at ratio*r_px
-   (ratio 1.2), so the stroke is centred at (1+ratio)/2*r_px with width
-   (ratio-1)*r_px. The stroke has a minimum of 1.5 CSS px. When clamped, the
-   inner edge stays at r_px and the outer edge grows.
+1. For time t (a frame's pts), linearly interpolate x, y, r and sl between the
+   rows on either side if they are at most 2.5/fps apart. Otherwise use the
+   nearest row if it is within 0.5/fps (the same frame), or draw nothing.
+   ``ring`` and ``sa`` come from the nearest row. Columns are looked up by name;
+   files without sl/sa render as circles.
+2. Draw one ring around the ball outline. The outline is a stadium (segment
+   centre +- sl along sa, thickened by r), or a circle when sl_px < 0.5*r_px or
+   in circle-only mode. The inner edge is on the outline (distance r from the
+   segment) and the outer edge is at distance ratio*r (ratio 1.2), so the stroke
+   width is (ratio-1)*r_px, with a minimum of 1.5 CSS px. When clamped, the
+   inner edge stays on the outline and the outer edge grows.
    CSS px are converted to video px assuming the player shows the video
    ``display_width`` CSS px wide (default 1280).
 3. No fill, glow or trail.
@@ -27,6 +31,7 @@ import cv2
 import numpy as np
 
 from .trackfile import FLAG_BOUNCE, FLAG_HIT, FLAG_INTERPOLATED
+from .ringcolor import segment_distance
 from .video import ffmpeg_bin, iter_frames, open_video
 
 
@@ -41,9 +46,14 @@ class TrackSampler:
     def __init__(self, track: dict, conf_threshold: float = 0.5) -> None:
         f = track["fields"]
         self.ix = {k: f.index(k) for k in f}
-        self.rows = [r for r in track["frames"] if r[self.ix["conf"]] >= conf_threshold]
+        ci = self.ix["conf"]
+        self.rows = sorted((r for r in track["frames"] if r[ci] >= conf_threshold), key=lambda r: r[self.ix["t"]])
         self.ts = [r[self.ix["t"]] for r in self.rows]
         self.fps = float(track["video"]["fps"])
+
+    def _get(self, row, name, default=0.0):
+        i = self.ix.get(name)
+        return row[i] if i is not None else default
 
     def at(self, t: float) -> dict | None:
         if not self.rows:
@@ -51,41 +61,49 @@ class TrackSampler:
         i = bisect.bisect_left(self.ts, t)
         before = self.rows[i - 1] if i > 0 else None
         after = self.rows[i] if i < len(self.rows) else None
-        # An exact hit counts as "after" (t_after == t).
-        ix = self.ix
         cands = [r for r in (before, after) if r is not None]
-        nearest = min(cands, key=lambda r: abs(r[ix["t"]] - t))
-        if before is not None and after is not None and after[ix["t"]] - before[ix["t"]] <= 2.5 / self.fps + 1e-9:
-            span = after[ix["t"]] - before[ix["t"]]
-            w = 0.0 if span <= 0 else (t - before[ix["t"]]) / span
-            vals = {k: before[ix[k]] + w * (after[ix[k]] - before[ix[k]]) for k in ("x", "y", "r")}
-        elif abs(nearest[ix["t"]] - t) < 1.0 / self.fps - 1e-3:
-            # "Within 1/fps" is taken as strictly less than one frame (1 ms slack for
-            # rounding). Otherwise a missing row would repeat the previous frame's
-            # position one frame late.
-            vals = {k: nearest[ix[k]] for k in ("x", "y", "r")}
+        g = self._get
+        nearest = min(cands, key=lambda r: abs(g(r, "t") - t))
+        if before is not None and after is not None and g(after, "t") - g(before, "t") <= 2.5 / self.fps + 1e-9:
+            span = g(after, "t") - g(before, "t")
+            w = 0.0 if span <= 0 else (t - g(before, "t")) / span
+            vals = {k: g(before, k) + w * (g(after, k) - g(before, k)) for k in ("x", "y", "r", "sl")}
+        elif abs(g(nearest, "t") - t) <= 0.5 / self.fps + 1e-6:
+            vals = {k: g(nearest, k) for k in ("x", "y", "r", "sl")}
         else:
             return None
-        vals["ring"] = nearest[ix["ring"]]
-        vals["conf"] = nearest[ix["conf"]]
-        vals["flags"] = nearest[ix["flags"]]
-        vals["row_t"] = nearest[ix["t"]]
+        vals["sa"] = g(nearest, "sa")
+        vals["ring"] = g(nearest, "ring")
+        vals["conf"] = g(nearest, "conf")
+        vals["flags"] = g(nearest, "flags")
+        vals["row_t"] = g(nearest, "t")
         return vals
 
 
 def ring_geometry(r_px: float, css_to_px: float, ratio: float = 1.2, min_stroke_css: float = 1.5):
-    """Return (inner, outer) radii in video px, per rule 3 (ring around the ball)."""
+    """Return (inner, outer) distances from the ball's centre line in video px (rule 3)."""
     inner = r_px
     width = max((ratio - 1.0) * r_px, min_stroke_css * css_to_px)
     return inner, inner + width
 
 
+def ring_shape(r_px: float, sl_px: float, circle_only: bool = False) -> float:
+    """Effective half-length for drawing: 0 (circle) unless it's a real streak (rule 4)."""
+    if circle_only or sl_px < 0.5 * r_px:
+        return 0.0
+    return float(sl_px)
+
+
 def draw_ring(img: np.ndarray, cx: float, cy: float, inner: float, outer: float,
-              color_bgr: tuple[int, int, int]) -> None:
-    """Anti-aliased annulus [inner, outer] with exact per-pixel coverage (4x4 supersampling)."""
+              color_bgr: tuple[int, int, int], sl: float = 0.0, sa: float = 0.0) -> None:
+    """Anti-aliased ring whose inner edge is at distance ``inner`` and outer edge at ``outer``
+    from the segment centre +- sl along sa (a stadium; a circle when sl = 0).
+    Uses exact per-pixel coverage with 4x4 supersampling."""
     h, w = img.shape[:2]
-    x0, x1 = int(np.floor(cx - outer - 1)), int(np.ceil(cx + outer + 1))
-    y0, y1 = int(np.floor(cy - outer - 1)), int(np.ceil(cy + outer + 1))
+    ex = abs(sl * np.cos(sa)) + outer + 1
+    ey = abs(sl * np.sin(sa)) + outer + 1
+    x0, x1 = int(np.floor(cx - ex)), int(np.ceil(cx + ex))
+    y0, y1 = int(np.floor(cy - ey)), int(np.ceil(cy + ey))
     x0c, y0c, x1c, y1c = max(0, x0), max(0, y0), min(w, x1), min(h, y1)
     if x1c <= x0c or y1c <= y0c:
         return
@@ -93,12 +111,21 @@ def draw_ring(img: np.ndarray, cx: float, cy: float, inner: float, outer: float,
     offs = (np.arange(ss) + 0.5) / ss
     ys = (np.arange(y0c, y1c)[:, None] + offs[None, :]).reshape(-1)
     xs = (np.arange(x0c, x1c)[:, None] + offs[None, :]).reshape(-1)
-    d = np.hypot(xs[None, :] - cx, ys[:, None] - cy)
+    d = segment_distance(xs[None, :], ys[:, None], cx, cy, sl, sa)
     inside = ((d >= inner) & (d <= outer)).astype(np.float32)
     cov = inside.reshape(y1c - y0c, ss, x1c - x0c, ss).mean(axis=(1, 3))[..., None]
     roi = img[y0c:y1c, x0c:x1c].astype(np.float32)
     col = np.array(color_bgr, np.float32)[None, None, :]
     img[y0c:y1c, x0c:x1c] = (roi * (1 - cov) + col * cov + 0.5).astype(np.uint8)
+
+
+def draw_sample(img: np.ndarray, s: dict, W: int, H: int, css_to_px: float, circle_only: bool = False,
+                ratio: float = 1.2, min_stroke_css: float = 1.5, dx: float = 0.0, dy: float = 0.0) -> None:
+    """Draw the ring for one sampled row (``TrackSampler.at``) onto img (offset by dx, dy)."""
+    r = s["r"] * W
+    sl = ring_shape(r, s["sl"] * W, circle_only)
+    inner, outer = ring_geometry(r, css_to_px, ratio, min_stroke_css)
+    draw_ring(img, s["x"] * W - dx, s["y"] * H - dy, inner, outer, hex_to_bgr(s["ring"]), sl, s["sa"])
 
 
 def _zoom_inset(canvas: np.ndarray, src: np.ndarray, cx: float, cy: float, box: int = 60, zoom: int = 5,
@@ -119,7 +146,7 @@ def render_preview(media: str | Path, track: dict, out: str | Path, *, side_by_s
                    debug: dict | None = None, display_width: float = 1280.0,
                    time_offset: float | None = None, inset: bool | None = None,
                    conf_threshold: float = 0.5, ratio: float = 1.2, min_stroke_css: float = 1.5,
-                   crf: int = 18) -> dict:
+                   crf: int = 18, circle_only: bool = False) -> dict:
     """Write a preview video. ``debug`` = {"candidates": {abs_frame: [[x,y,s],...]}, "raw": {...}}.
 
     Returns simple stats (frames written, frames with a ring).
@@ -150,9 +177,7 @@ def render_preview(media: str | Path, track: dict, out: str | Path, *, side_by_s
             img = orig.copy()
             s = sampler.at(t)
             if s is not None:
-                cx, cy, r = s["x"] * W, s["y"] * H, s["r"] * W
-                inner, outer = ring_geometry(r, css_to_px, ratio, min_stroke_css)
-                draw_ring(img, cx, cy, inner, outer, hex_to_bgr(s["ring"]))
+                draw_sample(img, s, W, H, css_to_px, circle_only, ratio, min_stroke_css)
                 drawn += 1
             if debug is not None:
                 for c in cand.get(idx, cand.get(str(idx), [])):
@@ -165,7 +190,8 @@ def render_preview(media: str | Path, track: dict, out: str | Path, *, side_by_s
                     fl = s["flags"]
                     tags = ("I" if fl & FLAG_INTERPOLATED else "D") + ("B" if fl & FLAG_BOUNCE else "") + \
                            ("H" if fl & FLAG_HIT else "")
-                    label += f" conf={s['conf']:.2f} r={s['r'] * W:.1f}px {tags} {s['ring']}"
+                    label += (f" conf={s['conf']:.2f} r={s['r'] * W:.1f}px sl={s['sl'] * W:.1f}px "
+                              f"sa={np.degrees(s['sa']):.0f} {tags} {s['ring']}")
                 cv2.putText(img, label, (12, H - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 4)
                 cv2.putText(img, label, (12, H - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 1)
             if inset and s is not None:
@@ -183,12 +209,12 @@ def render_preview(media: str | Path, track: dict, out: str | Path, *, side_by_s
     return {"frames": n, "frames_with_ring": drawn, "css_to_px": css_to_px}
 
 
-def render_contact_sheet(media: str | Path, track: dict, out: str | Path, *, n: int = 36, cols: int = 6,
+def render_contact_sheet(media: str | Path, track: dict, out: str | Path, *, n: int = 36, cols: int = 4,
                          crop: int = 64, zoom: int = 3, display_width: float = 1280.0,
                          time_offset: float | None = None, conf_threshold: float = 0.5) -> dict:
     """Grid of zoomed crops around the ball, spread over the processed range, with the ring drawn.
 
-    Each tile pairs the original crop (left) with the ringed crop (right). Frames
+    Each tile shows three panels: the original crop, the circle-only ring, and the stadium ring. Frames
     without a visible ring are shown centred on the last known position and
     labelled "no ring".
     """
@@ -215,16 +241,20 @@ def render_contact_sheet(media: str | Path, track: dict, out: str | Path, *, n: 
         x0 = int(np.clip(round(cx) - crop // 2, 0, W - crop))
         y0 = int(np.clip(round(cy) - crop // 2, 0, H - crop))
         orig = frame[y0:y0 + crop, x0:x0 + crop].copy()
-        ring = orig.copy()
+        circle = orig.copy()
+        stadium = orig.copy()
         if s is not None:
-            inner, outer = ring_geometry(s["r"] * W, css_to_px)
-            draw_ring(ring, cx - x0, cy - y0, inner, outer, hex_to_bgr(s["ring"]))
-        big = [cv2.resize(im, None, fx=zoom, fy=zoom, interpolation=cv2.INTER_NEAREST) for im in (orig, ring)]
-        tile = np.hstack([big[0], np.full((crop * zoom, 2, 3), 255, np.uint8), big[1]])
+            draw_sample(circle, s, W, H, css_to_px, circle_only=True, dx=x0, dy=y0)
+            draw_sample(stadium, s, W, H, css_to_px, circle_only=False, dx=x0, dy=y0)
+        big = [cv2.resize(im, None, fx=zoom, fy=zoom, interpolation=cv2.INTER_NEAREST)
+               for im in (orig, circle, stadium)]
+        sep = np.full((crop * zoom, 2, 3), 255, np.uint8)
+        tile = np.hstack([big[0], sep, big[1], sep, big[2]])
         label = f"{t:.2f}s"
         if s is None:
             label += " no ring"
         else:
+            label += f" sl/r={s['sl'] / max(s['r'], 1e-9):.1f}"
             fl = s["flags"]
             label += f" c{s['conf']:.2f}" + (" interp" if fl & FLAG_INTERPOLATED else "") + \
                      (" bounce" if fl & FLAG_BOUNCE else "") + (" hit" if fl & FLAG_HIT else "")
@@ -238,7 +268,7 @@ def render_contact_sheet(media: str | Path, track: dict, out: str | Path, *, n: 
     head = np.zeros((28, grid.shape[1], 3), np.uint8)
     seg = track["segments"][0] if track.get("segments") else {"start": 0, "end": 0}
     cv2.putText(head, f"{track.get('video_id')}  {seg['start']:.2f}-{seg['end']:.2f}s  "
-                f"left: original crop, right: overlay ring (x{zoom})", (8, 19),
+                f"each cell: original | circle ring (old) | stadium ring (new), x{zoom}", (8, 19),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)

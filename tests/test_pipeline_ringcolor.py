@@ -1,3 +1,4 @@
+import cv2
 import numpy as np
 import pytest
 
@@ -89,3 +90,27 @@ def test_median_is_taken_in_linear_rgb():
     assert rc.luminance_linear(med) == pytest.approx(rc.srgb_to_linear(np.array([128 / 255]))[0], rel=1e-6)
     assert rc.hex_luminance("#ffffff") == pytest.approx(1.0)
     assert rc.hex_luminance("#000000") == pytest.approx(0.0)
+
+
+def test_stadium_annulus_excludes_the_streak():
+    # A long white streak on black: a circle annulus around the centre would sample
+    # the streak; the stadium annulus must not.
+    img = np.zeros((80, 80, 3), np.uint8)
+    cv2.line(img, (20, 40), (60, 40), (255, 255, 255), 7)
+    streak = img[..., 0] > 0
+    circle = rc.annulus_mask((80, 80), 40.5, 40.5, 3.5)
+    stadium = rc.annulus_mask((80, 80), 40.5, 40.5, 3.5, sl=20.0, sa=0.0)
+    assert (circle & streak).sum() > 20  # the old circle annulus samples the streak
+    assert (stadium & streak).sum() == 0
+    L_stadium = rc.background_luminance(img, 40.5, 40.5, 3.5, sl=20.0, sa=0.0)
+    assert L_stadium < 0.01
+    assert rc.best_candidate(L_stadium)[0] == rc.WHITE
+    # Direction matters: the same streak at 90 degrees.
+    img2 = np.ascontiguousarray(np.transpose(img, (1, 0, 2)))
+    assert rc.background_luminance(img2, 40.5, 40.5, 3.5, sl=20.0, sa=np.pi / 2) < 0.01
+    assert rc.background_luminance(img2, 40.5, 40.5, 3.5, sl=20.0, sa=-np.pi / 2) < 0.01
+
+
+def test_segment_distance():
+    d = rc.segment_distance(np.array([0.0, 10.0, 15.0]), np.array([3.0, 0.0, 0.0]), 0.0, 0.0, 10.0, 0.0)
+    assert d.tolist() == pytest.approx([3.0, 0.0, 5.0])

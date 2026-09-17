@@ -183,21 +183,29 @@ def process_video(
             x, y = q.x / W, q.y / H
             if not (0 <= x <= 1 and 0 <= y <= 1):
                 continue
-            rows.append(trackfile.make_row(src_times[q.frame], x, y, q.r / W, q.conf, q.ring, q.flags))
+            rows.append(trackfile.make_row(src_times[q.frame], x, y, q.r / W, q.conf, q.ring, q.flags,
+                                           q.sl / W, q.sa))
         n_frames = i1 - i0
-        n_interp = sum(1 for r in rows if r[6] & trackfile.FLAG_INTERPOLATED)
+        FI = {f: i for i, f in enumerate(trackfile.FIELDS)}
+        n_interp = sum(1 for r in rows if r[FI["flags"]] & trackfile.FLAG_INTERPOLATED)
+        sl_px = np.array([r[FI["sl"]] * W for r in rows]) if rows else np.zeros(0)
+        r_px = np.array([r[FI["r"]] * W for r in rows]) if rows else np.zeros(0)
         stats = {
             "frames_analysed": n_frames,
             "rows": len(rows),
             "rows_pct": round(100.0 * len(rows) / max(1, n_frames), 1),
-            "rows_conf_ge_0_5": sum(1 for r in rows if r[4] >= 0.5),
-            "visible_pct": round(100.0 * sum(1 for r in rows if r[4] >= 0.5) / max(1, n_frames), 1),
+            "rows_conf_ge_0_5": sum(1 for r in rows if r[FI["conf"]] >= 0.5),
+            "visible_pct": round(100.0 * sum(1 for r in rows if r[FI["conf"]] >= 0.5) / max(1, n_frames), 1),
+            "stadium_rows": int(np.sum(sl_px >= 0.5 * r_px)) if rows else 0,
+            "streak_half_length_px_median": round(float(np.median(sl_px)), 2) if rows else None,
+            "streak_ratio_median": round(float(np.median((sl_px + r_px) / r_px)), 2) if rows else None,
+            "exposure_k": rinfo.get("exposure_k"),
             "interpolated_rows": n_interp,
             "interpolated_pct": round(100.0 * n_interp / max(1, n_frames), 1),
             "detected_rows": len(rows) - n_interp,
             "radius_measured_rows": sum(1 for q in final if q.measured),
-            "bounces": sum(1 for r in rows if r[6] & trackfile.FLAG_BOUNCE),
-            "hits": sum(1 for r in rows if r[6] & trackfile.FLAG_HIT),
+            "bounces": sum(1 for r in rows if r[FI["flags"]] & trackfile.FLAG_BOUNCE),
+            "hits": sum(1 for r in rows if r[FI["flags"]] & trackfile.FLAG_HIT),
             "camera_cuts": [round(float(src_times[c]), 3) for c in dres.cuts],
             "static_candidates_removed": tr.static_removed,
             "outliers_removed": tr.outliers_removed,

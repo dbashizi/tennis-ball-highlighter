@@ -18,6 +18,7 @@ uv run tbh process data/clips/YTkyRTsiIaY_359-372.mp4 --time-offset 359 --start 
 # Local verification tools (they never go into the extension)
 uv run tbh preview data/clips/YTkyRTsiIaY_359-372.mp4 samples/YTkyRTsiIaY.track.json --out data/previews/p.mp4
 uv run tbh preview ... --side-by-side          # original | overlay, with a 5x zoom inset of the ball
+uv run tbh preview ... --circle-only           # the user setting: circle at the streak centre
 uv run tbh preview ... --debug data/previews/cands.json --conf 0   # raw detections + per-frame labels
 uv run tbh contact data/clips/YTkyRTsiIaY_359-372.mp4 samples/YTkyRTsiIaY.track.json --out sheet.png
 uv run tbh validate samples/YTkyRTsiIaY.track.json
@@ -51,7 +52,23 @@ full-resolution refinement.
 | detect | `detect.py`, `models/tracknet.py` | Runs TrackNet on 640x360 (3 stacked BGR frames: t, t-1, t-2) on MPS in batches of 4, falling back to CPU. It reads the **soft** heatmap `1 - p(background)` rather than the argmax, which gives about 15% more detections on weak balls. It is computed sparsely because a dense 256-way logsumexp is 3x slower than the network. Peaks come from connected components, at most 4 candidates per frame. Camera cuts are detected with an HSV-histogram Bhattacharyya distance plus a mean grey difference. Near a cut or at the clip start, a frame takes its context from the next frames. |
 | track | `track.py` | Removes static false positives (a spot visited at least 3 separate times). Builds tracklets under constant-velocity prediction with a physical speed limit (7% of width per frame at 25 fps). Accepts tracklets greedily with overlap trimming. Runs a two-sided consistency test for outliers (worst first). Splits into pieces at kinks with a quadratic fit per piece. Fills gaps of up to 8 frames with flag 1, choosing a model per gap: cubic Hermite if both sides agree, a **V (kink) model** if the two flight lines meet inside the gap (for gaps of at most 6 frames), or a one-sided quadratic extrapolation if the kink is at the gap's edge. Otherwise the gap is left empty; it never guesses across hidden bounces or hits. An interpolated frame snaps to a weak TrackNet candidate lying within 1.5% of width. Bounce (2) and hit (4) labels come from a conservative velocity heuristic. |
 | refine | `refine.py`, `radius.py`, `recover.py` | Runs a full-resolution pass with a +-12 frame buffer. Each point is measured against a **background median** of neighbouring frames, choosing the frames whose surroundings best match (players and shadows move). The blob gives the **centre** (diff-weighted centroid) and the **radius**: `2*sqrt(lambda_min)` for round blobs and `sqrt(3*lambda_min)` for streaks. That is the half-width *across* the streak, never its length. A trajectory-guided classical search in gaps (the hybrid step) adds only isolated, ball-shaped, lighter-than-background blobs. |
-| finalize | `refine.py`, `ringcolor.py`, `trackfile.py`, `api.py` | **Radius smoothing:** a robust per-shot model `r = a + b*y` (depth follows the image row for a fixed broadcast camera, and b >= 0). The measurement/model ratio is median-filtered and Gaussian-filtered (sigma 6 frames), clamped to 0.75-1.3, and r is clamped to 0.12-0.65% of width. **Ring colour:** exactly the spec rule (median of the 1.3r-2.5r annulus in linear RGB, max-WCAG candidate, magenta only at 1.2x, 15%/3-frame hysteresis). Hysteresis resets at cuts and at track breaks longer than 8 frames. **Confidence:** the detection score smoothed along the piece, times fit quality, boosted when the full-res blob confirms a ball, and decaying across gaps. Rows below 0.35 are dropped; renderers hide rows below 0.5 by default. |
+| streak | `radius.py`, `refine.py` | **Motion blur (`sl`, `sa`).** A looser mask (30% of the blob's peak difference) keeps the faint tail. Along and across the principal axis, the half-extents come from 1.5/98.5 percentiles, and `sl = along - across`. Blur widens both equally, so this is the centre-to-cap-centre distance; the centre moves to the streak's midpoint. `sl` is smoothed with a weighted mean over +-2 frames of the same piece. Neighbours are rescaled to the row's speed, and an exposure model `sl = k * abs(v)` (weight 0.3) is included, with k fitted per clip (0.29 here, i.e. the shutter is open about 58% of the frame). Rows without a measurement (interpolated ones included) use `k * abs(v)` from the final positions. `sl` is capped at `0.75*abs(v) + 0.5*r` and 4% of width. `sa` averages measured directions and the velocity direction as doubled-angle vectors (removing the pi ambiguity), then flips to point along the motion. At bounce/hit frames without a direct measurement, `sl = 0`: the exposure straddles the contact, so the streak is a V, and a circle is less wrong than a misoriented pill. A measurement whose midpoint is away from the track point is still accepted if the track point lies on the measured streak. |
+| finalize | `refine.py`, `ringcolor.py`, `trackfile.py`, `api.py` | **Radius smoothing:** a robust per-shot model `r = a + b*y` (depth follows the image row for a fixed broadcast camera, and b >= 0). The measurement/model ratio is median-filtered and Gaussian-filtered (sigma 6 frames), clamped to 0.75-1.3, and r is clamped to 0.12-0.65% of width. **Ring colour:** the spec rule (median in linear RGB, max-WCAG candidate, magenta only at 1.2x, 15%/3-frame hysteresis). The annulus is taken **around the stadium outline**: pixels 1.3r-2.5r from the streak's centre segment, so the streak itself is never sampled. It is computed in a second full-res pass, once the final centre, r, sl and sa are known. Hysteresis resets at cuts and at track breaks longer than 8 frames. **Confidence:** the detection score smoothed along the piece, times fit quality, boosted when the full-res blob confirms a ball, and decaying across gaps. Rows below 0.35 are dropped; renderers hide rows below 0.5 by default. |
+
+### Output columns
+
+The pipeline writes `fields = [t, x, y, r, conf, ring, flags, sl, sa]`. `trackfile.validate`/`merge`
+look every column up by name, accept files without `sl`/`sa` (read as 0) and ignore unknown
+columns. `merge` remaps old rows to the new file's columns, filling `sl = sa = 0`.
+(`src/tbh/service/merge.py` does the same; the coordinator updated it.)
+
+### Preview drawing
+
+`preview.py` follows the overlay spec. It samples at each frame's pts:
+- It interpolates x, y, r and sl between rows at most 2.5/fps apart. Otherwise it uses the nearest row within 0.5/fps. `ring` and `sa` come from the nearest row.
+- The ring is drawn by exact sub-pixel coverage of `r <= dist(pixel, streak segment) <= r + stroke`, with `stroke = max(0.2 r, 1.5 CSS px)`. So the inner edge is always on the ball or streak outline.
+- The stadium is used only when `sl_px >= 0.5 r_px`; otherwise, or with `--circle-only`, it draws a circle.
+- The contact sheet shows three panels per cell: original, circle ring (old), stadium ring (new).
 
 ### TrackNet's lead along the motion
 
@@ -118,7 +135,10 @@ These figures are from the committed `samples/YTkyRTsiIaY.track.json`, a real UR
 | interpolated rows (flag 1) | 23 (**7.1%** of frames) |
 | rows with a full-res radius/centre measurement | 241 |
 | radius | 2.9-3.5 px (0.15-0.18% of width; ball diameter about 0.33% of width) |
-| ring colour | `#101010` on every row (see the note above) |
+| ring colour | `#101010` on every row (see the note above; unchanged with the stadium annulus) |
+| rows drawn as a stadium (`sl >= 0.5 r`) | 233 of 260 |
+| streak half-length `sl` (median) | 5.9 px; the median streak length/width `(sl + r)/r` is 2.9, up to about 6 |
+| exposure constant k (`sl ~ k*abs(v)`) | 0.29 |
 | bounces / hits labelled | 4 / 4 (the labels I checked by eye matched the footage; several events are missed) |
 | static false-positive candidates removed | 7 (a fixed bright spot in the stands near (1710,150)) |
 | outliers rejected | 4 |
@@ -146,11 +166,17 @@ ball-boy area at 310) are all rejected.
 |---|---|
 | TrackNet alone, quiet machine | 27-33 frames/s (batch 4, fp32, MPS; fp16 was slower) |
 | detection stage in the final run (with decode and peaks; other agents were using the GPU and Chrome) | 13 frames/s |
-| full run: download 5.8 s, decode 1.7 s, detect 25.3 s, track and refine 4.1 s | **36.9 s for the 13 s clip** (0.35x real time) |
+| full run (with streaks): download 5.7 s, decode 1.8 s, detect 19.1 s (17.5 fps), track and refine and ring pass 5.2 s | **31.8 s for the 13 s clip** (0.41x real time) |
 | worst case seen under heavy contention (load average about 17) | 0.3 frames/s for detection |
 
-Previews (local only): `data/previews/YTkyRTsiIaY_preview.mp4`, `..._side_by_side.mp4`,
-`..._contact.png`.
+Previews (local only): `data/previews/YTkyRTsiIaY_preview.mp4` (stadium), `..._preview_circle.mp4`
+(`--circle-only`), `..._side_by_side.mp4`, `..._contact.png` (original | circle | stadium).
+
+**Stadium ring, before and after (visual check of about 30 zoomed frames):**
+- Before, the circle sat on the middle of almost every streak.
+- After, on 26 of 27 checked streak frames, the pill surrounds the visible streak with the correct orientation and a thin stroke. Sharp or round balls (for example 359.76 s, 360.48 s, 367.52 s) keep a plain circle.
+- The exception was the bounce frame 190: before the fix, the pill was nearly horizontal while the streak was diagonal. It now falls back to a circle.
+- Interpolated rows (136, 201, 258) get pills along the flight. Where the interpolated position is a few px off, the pill sits beside the streak (136).
 
 ## Known limitations
 
@@ -166,21 +192,23 @@ Previews (local only): `data/previews/YTkyRTsiIaY_preview.mp4`, `..._side_by_sid
   0.16% of width), below the usual 0.4-1.2% diameter range for HD broadcasts, so the
   lower clamp is set at 0.12%. The r(y) depth model assumes a fixed camera; with
   cuts it is refitted per shot, but zooms or pans inside a shot are not modelled.
-- **Motion blur.** r follows the streak's half-width, so on long streaks the ring
-  (radius 1.1r) overlaps the streak's ends. The spec asks for a circle; a capsule
-  would fit streaks better.
+- **Motion blur.** Handled with the stadium ring (see above). Before, the circle ring
+  (radius about 1.1r at the streak centre) sat on top of the streak and hid its middle.
+  Now the pill encloses the visible streak (a synthetic test checks that every pixel above
+  half contrast lies inside the ring's inner edge). The ends are the faint part: the loose
+  mask is at 30% of peak, so the faintest tail tips (under about 15% of the exposure) can
+  poke out by a pixel or two. The sharper Hermite/V fills also make interpolated rows' pills
+  follow the flight. Their position error (5-10 px near kinks) is more visible as a pill
+  than it was as a circle.
+- **Contact frames.** At a bounce or hit the real streak is V-shaped. A straight pill can't
+  enclose it; without a direct measurement those rows fall back to a circle.
 - **Bounce/hit flags** use a conservative heuristic tuned on one clip. They have
   few false labels but miss about half of the events.
 - **Gap recovery** (classical search) rarely finds anything reliable on this clip
   (1-2 frames). Looser settings mostly found player limbs, lines and banner text.
-- **Rendering-rule edge cases** (reported to the extension side):
-  - *"Nearest row within 1/fps".* If the renderer samples at the exact frame pts and
-    that frame has no row, the previous frame's row is exactly 1/fps away. An
-    inclusive comparison then draws the ring one frame late (up to about 40 px behind a
-    fast ball). `preview.py` uses a strict comparison (< 1/fps - 1 ms).
-  - *Interpolating at arbitrary `currentTime`.* Interpolating mid-frame puts the ring
-    ahead of the displayed frame. Sampling at the frame's `mediaTime`
-    (`requestVideoFrameCallback`) avoids this.
+- **Rendering rules.** The spec now uses "nearest row within 0.5/fps" and samples at
+  `requestVideoFrameCallback` `mediaTime`. That resolves the one-frame-late ring and the
+  mid-frame lead reported earlier.
 - **Throughput** depends heavily on machine load (see the metrics). Detection dominates.
 - yt-dlp warns that no JavaScript runtime (deno) is installed. Downloads still work
   today, but YouTube extraction may need one in the future.

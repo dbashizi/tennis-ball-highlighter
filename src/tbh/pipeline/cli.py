@@ -3,7 +3,7 @@
 tbh process <url-or-file> --start 5:59 --end 6:12 --out track.json [--keep-media] [--work-dir DIR]
             [--time-offset SECONDS] [--video-id ID] [--detector auto|tracknet|classical]
             [--device mps|cpu] [--debug-out candidates.json]
-tbh preview <media> <track.json> --out preview.mp4 [--side-by-side] [--debug candidates.json]
+tbh preview <media> <track.json> --out preview.mp4 [--side-by-side] [--circle-only] [--debug candidates.json]
             [--time-offset SECONDS] [--display-width 1280]
 tbh contact <media> <track.json> --out sheet.png [-n 36]
 tbh validate <track.json>
@@ -86,7 +86,7 @@ def cmd_preview(a) -> int:
     t0 = time.time()
     st = render_preview(a.media, track, a.out, side_by_side=a.side_by_side, debug=debug,
                         display_width=a.display_width, time_offset=parse_time(a.time_offset),
-                        conf_threshold=a.conf)
+                        conf_threshold=a.conf, circle_only=a.circle_only)
     print(json.dumps({**st, "out": str(a.out), "seconds": round(time.time() - t0, 1)}))
     return 0
 
@@ -147,6 +147,8 @@ def build_parser() -> argparse.ArgumentParser:
     pv.add_argument("--display-width", type=float, default=1280.0,
                     help="assumed on-screen player width in CSS px (for the 1.5px minimum stroke)")
     pv.add_argument("--conf", type=float, default=0.5, help="hide rows below this confidence")
+    pv.add_argument("--circle-only", action="store_true",
+                    help="always draw a circle at the streak centre (the user setting), never a stadium")
     pv.set_defaults(func=cmd_preview)
 
     cs = sub.add_parser("contact", help="write a contact sheet PNG (zoomed crops around the ball)")
@@ -154,7 +156,7 @@ def build_parser() -> argparse.ArgumentParser:
     cs.add_argument("track", type=Path)
     cs.add_argument("--out", required=True, type=Path)
     cs.add_argument("-n", type=int, default=36)
-    cs.add_argument("--cols", type=int, default=6)
+    cs.add_argument("--cols", type=int, default=4)
     cs.add_argument("--time-offset")
     cs.set_defaults(func=cmd_contact)
 

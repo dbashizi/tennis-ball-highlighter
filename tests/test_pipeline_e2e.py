@@ -61,9 +61,10 @@ def synthetic_video(tmp_path_factory):
 def _check_track(track, path):
     trackfile.validate(track)
     assert track["segments"] == [{"start": OFFSET, "end": OFFSET + N / FPS}]
-    rows = track["frames"]
+    rows = [trackfile.row_dict(track, r) for r in track["frames"]]
     assert len(rows) >= 0.8 * N
-    for t, x, y, r, conf, ring, flags in rows:
+    for d in rows:
+        t, x, y, r, ring = d["t"], d["x"], d["y"], d["r"], d["ring"]
         i = int(round((t - OFFSET) * FPS))
         assert abs((t - OFFSET) * FPS - i) < 1e-6  # t is on the source frame grid
         tx, ty = ball_xy(i)
@@ -72,6 +73,9 @@ def _check_track(track, path):
         assert r * W == pytest.approx(R, rel=0.35)
         assert ring in ("#101010", "#f5f5f5")
         assert abs(x * W - 600) > 20 or abs(y * H - 30) > 20  # never on the logo
+        # The synthetic ball is sharp: any streak estimate stays short.
+        assert d["sl"] * W < R
+    assert track["fields"] == trackfile.FIELDS
     assert path.exists()  # a local input file is never deleted
 
 
@@ -91,7 +95,7 @@ def test_e2e_classical(synthetic_video, tmp_path):
 def test_e2e_subrange_uses_source_timeline(synthetic_video, tmp_path):
     track = process_video(str(synthetic_video), OFFSET + 0.4, OFFSET + 1.2, tmp_path, None,
                           time_offset=OFFSET, detector="classical")
-    ts = [r[0] for r in track["frames"]]
+    ts = [trackfile.row_dict(track, r)["t"] for r in track["frames"]]
     assert ts and min(ts) >= OFFSET + 0.4 - 1e-9 and max(ts) < OFFSET + 1.2
     assert track["segments"] == [{"start": OFFSET + 0.4, "end": OFFSET + 1.2}]
 
@@ -109,6 +113,55 @@ def test_e2e_tracknet_smoke(synthetic_video, tmp_path):
                           detector="tracknet", device="cpu")
     trackfile.validate(track)
     assert track["generator"]["detector"] == "tracknet-v2"
+
+
+def test_e2e_motion_blurred_ball_gets_streak_fields(tmp_path):
+    # A fast ball rendered with motion blur: 18 px per frame, shutter open half the frame.
+    n = 40
+
+    def xy(t):
+        return 60 + 18.0 * t, 80 + 5.0 * t
+
+    frames = []
+    for i in range(n):
+        img = np.empty((H, W, 3), np.float32)
+        img[:] = (70, 130, 90)
+        acc = np.zeros((H, W), np.float32)
+        subs = 12
+        for k in range(subs):
+            x, y = xy(i - 0.25 + 0.5 * k / (subs - 1))
+            m = np.zeros((H, W), np.float32)
+            cv2.circle(m, (int(x * 8), int(y * 8)), int(R * 8), 1.0, -1, cv2.LINE_AA, 3)
+            acc += m / subs
+        a = np.clip(acc * 2.0, 0, 1)[..., None]  # a streak is about as bright as the ball
+        img = img * (1 - a) + np.array((40, 235, 215), np.float32) * a
+        frames.append(np.clip(img, 0, 255).astype(np.uint8))
+    path = tmp_path / "blur.mp4"
+    _write(path, frames)
+    track = process_video(str(path), None, None, tmp_path / "w", None, time_offset=0.0, detector="classical")
+    rows = [trackfile.row_dict(track, r) for r in track["frames"]]
+    assert len(rows) >= 0.7 * n
+    # Half of the distance travelled while the shutter is open. The caps are
+    # covered for only part of the exposure, so the *visible* streak is shorter.
+    geo_sl = 0.25 * np.hypot(18.0, 5.0)
+    true_sa = np.arctan2(5.0, 18.0)
+    sls = np.array([d["sl"] * W for d in rows])
+    assert 0.5 * geo_sl <= np.median(sls) <= 1.1 * geo_sl
+    bg = np.array((70, 130, 90), np.float32)
+    for d in rows:
+        # Oriented along the motion (not flipped by pi).
+        assert abs((d["sa"] - true_sa + np.pi) % (2 * np.pi) - np.pi) < np.radians(12)
+        assert d["r"] * W == pytest.approx(R, rel=0.4)
+        # Every clearly visible streak pixel lies inside the ring's inner edge.
+        i = int(round(d["t"] * FPS))
+        diff = np.abs(frames[i].astype(np.float32) - bg).max(axis=2)
+        ys, xs = np.nonzero(diff > 0.5 * diff.max())
+        ux, uy = np.cos(d["sa"]), np.sin(d["sa"])
+        cx, cy, sl, r = d["x"] * W, d["y"] * H, d["sl"] * W, d["r"] * W
+        px, py = xs + 0.5 - cx, ys + 0.5 - cy
+        tt = np.clip(px * ux + py * uy, -sl, sl)
+        dist = np.hypot(px - tt * ux, py - tt * uy)
+        assert dist.max() <= r + 1.5, (i, dist.max(), r)
 
 
 def test_interlaced_source_is_field_doubled(tmp_path):
@@ -134,9 +187,10 @@ def test_interlaced_source_is_field_doubled(tmp_path):
     assert info.pts[1] - info.pts[0] == pytest.approx(0.5 / FPS)
     track = process_video(str(path), None, None, tmp_path / "w", None, time_offset=OFFSET, detector="classical")
     assert track["video"]["fps"] == pytest.approx(2 * FPS)
-    rows = track["frames"]
+    rows = [trackfile.row_dict(track, r) for r in track["frames"]]
     assert len(rows) >= n  # roughly one row per field
-    for t, x, y, *_ in rows:
+    for d in rows:
+        t, x, y = d["t"], d["x"], d["y"]
         k = (t - OFFSET) * FPS  # in source frames; fields sit on half frames
         assert abs(k * 2 - round(k * 2)) < 1e-6
         tx, ty = ball_xy(k)

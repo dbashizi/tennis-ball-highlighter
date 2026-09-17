@@ -44,11 +44,23 @@ def test_round_ball_radius_and_centre(r):
 def test_streak_uses_minor_axis(angle):
     r = 3.5
     frame, bg = _scene(r, streak=20.0, angle=angle, cx=32.0, cy=32.0)
+    m0 = measure_ball(frame, bg, 32.0, 32.0, W, search_frac=0.01)
+    assert m0 is not None
     m = measure_ball(frame, bg, 32.0, 32.0, W, search_frac=0.01)
     assert m is not None
     assert m.r == pytest.approx(r, rel=0.3)  # not the streak length
     assert m.major > 2.5 * m.r
     assert m.x == pytest.approx(32.0, abs=1.0)
+    # Half-length from the centre to the cap centre (the synthetic streak spans +-10 px).
+    assert m.sl == pytest.approx(10.0, rel=0.2)
+    diff = (m.angle - np.radians(angle)) % np.pi
+    assert min(diff, np.pi - diff) < np.radians(5)
+
+
+def test_round_ball_has_no_streak():
+    frame, bg = _scene(4.0)
+    m = measure_ball(frame, bg, 30.0, 30.0, W)
+    assert m.sl < 1.0
 
 
 def test_no_ball_no_measurement():
