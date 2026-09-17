@@ -75,3 +75,21 @@ def test_validate_rejects(mutate):
 def test_validate_rejects_non_dict():
     with pytest.raises(InvalidTrack):
         validate_track([])
+
+
+def test_merge_fills_optional_streak_columns_with_defaults():
+    old = {
+        "schema_version": 1, "video_id": "abcdefghijk", "video": {"fps": 25.0},
+        "segments": [{"start": 0.0, "end": 1.0}],
+        "fields": ["t", "x", "y", "r", "conf", "ring", "flags"],
+        "frames": [[0.5, 0.1, 0.2, 0.003, 0.9, "#101010", 0]],
+    }
+    new = {
+        "schema_version": 1, "video_id": "abcdefghijk", "video": {"fps": 25.0},
+        "segments": [{"start": 2.0, "end": 3.0}],
+        "fields": ["t", "x", "y", "r", "conf", "ring", "flags", "sl", "sa"],
+        "frames": [[2.5, 0.3, 0.4, 0.003, 0.8, "#f5f5f5", 0, 0.004, 1.2]],
+    }
+    merged = merge_tracks(old, new)
+    assert merged["frames"][0] == [0.5, 0.1, 0.2, 0.003, 0.9, "#101010", 0, 0.0, 0.0]
+    assert merged["frames"][1] == new["frames"][0]

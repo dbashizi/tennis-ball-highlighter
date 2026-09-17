@@ -6,6 +6,8 @@ import copy
 from numbers import Real
 
 REQUIRED_FIELDS = ("t", "x", "y", "r", "conf", "ring", "flags")
+# Values for optional columns missing from an older track (a round ball).
+OPTIONAL_DEFAULTS = {"sl": 0.0, "sa": 0.0}
 
 
 class InvalidTrack(ValueError):
@@ -86,7 +88,7 @@ def merge_tracks(old: dict, new: dict) -> dict:
             continue
         if remap:
             by_name = dict(zip(old_fields, row))
-            row = [by_name.get(f) for f in fields]
+            row = [by_name.get(f, OPTIONAL_DEFAULTS.get(f)) for f in fields]
         kept.append(row)
 
     t_new = fields.index("t")
