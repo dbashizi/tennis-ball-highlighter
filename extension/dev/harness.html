@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Overlay harness</title>
+  <link rel="icon" href="../icons/icon32.png">
+  <style>
+    :root { --bg: #0f0f0f; --panel: #1c1c1c; --line: #303030; --text: #f1f1f1; --muted: #9a9a9a; --ball: #d6f23a; --bad: #ff8a80; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.45 Roboto, system-ui, sans-serif; }
+    header { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+    header h1 { margin: 0; font-size: 15px; font-weight: 500; }
+    header nav { margin-left: auto; display: flex; gap: 12px; flex-wrap: wrap; }
+    a { color: var(--ball); }
+    .wrap { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 16px; padding: 16px; }
+    @media (max-width: 900px) { .wrap { grid-template-columns: 1fr; } }
+    .stage { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+    /* Mimics YouTube: positioned player, video container, object-fit contain. */
+    #movie_player { position: relative; width: 100%; aspect-ratio: 16 / 9; background: #000; overflow: hidden; resize: both; }
+    #movie_player.box-4x3 { aspect-ratio: 4 / 3; max-width: 720px; }
+    #movie_player.box-21x9 { aspect-ratio: 21 / 9; }
+    #movie_player.box-tall { aspect-ratio: 9 / 16; max-width: 360px; }
+    .html5-video-container { position: relative; width: 100%; height: 100%; }
+    video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; display: block; }
+    #movie_player.ad-showing::after { content: "Ad (overlay hidden)"; position: absolute; left: 12px; bottom: 12px; padding: 2px 8px; border-radius: 4px; background: #fc0; color: #000; font-weight: 500; }
+    .bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+    button, select, input { font: inherit; color: inherit; }
+    button, select { height: 30px; padding: 0 12px; border: 0; border-radius: 15px; background: #2e2e2e; cursor: pointer; }
+    button:hover { background: #3d3d3d; }
+    input[type="text"], input[type="number"] { height: 30px; padding: 0 8px; border: 1px solid var(--line); border-radius: 6px; background: #121212; }
+    input[type="range"] { accent-color: var(--ball); }
+    :focus-visible { outline: 2px solid var(--ball); outline-offset: 2px; }
+    #scrub { flex: 1; min-width: 160px; }
+    .clock { font-variant-numeric: tabular-nums; color: var(--muted); }
+    aside { display: flex; flex-direction: column; gap: 14px; }
+    fieldset { margin: 0; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+    legend { padding: 0 4px; color: var(--muted); }
+    label.row { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 4px 8px; margin: 6px 0; }
+    label.row input[type="text"] { grid-column: 1 / -1; width: 100%; }
+    label.row input[type="range"] { grid-column: 1 / -1; width: 100%; }
+    output { font-variant-numeric: tabular-nums; color: var(--muted); }
+    dl { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; margin: 0; font-variant-numeric: tabular-nums; }
+    dt { color: var(--muted); }
+    dd { margin: 0; overflow-wrap: anywhere; }
+    .bad { color: var(--bad); }
+    .good { color: var(--ball); }
+    #err { color: var(--bad); }
+  </style>
+</head>
+<body>
+  <header>
+    <img src="../icons/icon32.png" width="20" height="20" alt="">
+    <h1>Overlay harness</h1>
+    <nav aria-label="Presets">
+      <a href="?preset=synthetic">Synthetic</a>
+      <a href="?preset=synthetic&amp;box=4x3">Synthetic, letterboxed</a>
+      <a href="?preset=real">Real clip (YTkyRTsiIaY 5:59)</a>
+      <a href="sim.html">Page sim</a>
+    </nav>
+  </header>
+
+  <div class="wrap">
+    <div class="stage">
+      <div id="movie_player" class="html5-video-player">
+        <div class="html5-video-container">
+          <video id="video" class="html5-main-video" muted playsinline preload="auto"></video>
+        </div>
+      </div>
+      <div class="bar">
+        <button type="button" id="play">Play</button>
+        <button type="button" id="back" title="Back one frame (,)">‹ Frame</button>
+        <button type="button" id="fwd" title="Forward one frame (.)">Frame ›</button>
+        <input type="range" id="scrub" min="0" max="1" step="0.001" value="0" aria-label="Seek">
+        <span class="clock" id="clock">0:00.000</span>
+      </div>
+      <p id="err" role="alert"></p>
+    </div>
+
+    <aside>
+      <fieldset>
+        <legend>Source</legend>
+        <label class="row">Video URL<input type="text" id="videoUrl"></label>
+        <label class="row">Track URL<input type="text" id="trackUrl"></label>
+        <label class="row">Offset (track t = video t + offset)<input type="number" id="offset" step="0.001" style="width:100px"></label>
+        <div class="bar">
+          <button type="button" id="load">Load</button>
+          <select id="box" aria-label="Player box">
+            <option value="16x9">16:9 box</option>
+            <option value="4x3">4:3 box (letterbox)</option>
+            <option value="21x9">21:9 box (pillarbox)</option>
+            <option value="tall">9:16 box</option>
+          </select>
+          <select id="rate" aria-label="Playback rate">
+            <option value="0.25">0.25×</option>
+            <option value="0.5">0.5×</option>
+            <option value="1" selected>1×</option>
+            <option value="2">2×</option>
+          </select>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Ring</legend>
+        <label class="row"><span><input type="checkbox" id="enabled" checked> Enabled</span></label>
+        <label class="row">Ring shape
+          <select id="shape">
+            <option value="stadium">Follow streak</option>
+            <option value="circle">Circle only</option>
+          </select>
+        </label>
+        <label class="row">Size ratio <output id="ratioOut"></output><input type="range" id="ratio" min="1.1" max="1.5" step="0.05" value="1.2"></label>
+        <label class="row">Minimum stroke <output id="minStrokeOut"></output><input type="range" id="minStroke" min="0.5" max="4" step="0.25" value="1.5"></label>
+        <label class="row">Confidence threshold <output id="minConfOut"></output><input type="range" id="minConf" min="0" max="1" step="0.05" value="0.5"></label>
+        <label class="row"><span><input type="checkbox" id="debug"> Debug text</span></label>
+        <label class="row"><span><input type="checkbox" id="ad"> Simulate ad (<code>ad-showing</code>)</span></label>
+        <label class="row"><span><input type="checkbox" id="fallback"> Force rAF fallback (reload)</span></label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Readout</legend>
+        <dl>
+          <dt>Sync</dt><dd id="o-src">-</dd>
+          <dt>Track t</dt><dd id="o-t">-</dd>
+          <dt>Mode</dt><dd id="o-mode">-</dd>
+          <dt>Drawn</dt><dd id="o-drawn">-</dd>
+          <dt>Ring</dt><dd id="o-ring">-</dd>
+          <dt>Hidden</dt><dd id="o-hidden">-</dd>
+          <dt>Ball error</dt><dd id="o-err" title="Synthetic clip only: weighted yellow-streak centre vs ring centre, in video pixels">-</dd>
+          <dt>Fit</dt><dd id="o-hug" title="Synthetic clip, paused: ball pixels under the ring, overshoot past the inner edge (video px)">-</dd>
+        </dl>
+      </fieldset>
+    </aside>
+  </div>
+
+  <script type="module" src="harness.js"></script>
+</body>
+</html>

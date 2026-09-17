@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Page sim</title>
+  <link rel="icon" href="../icons/icon32.png">
+  <style>
+    :root { --bg: #0f0f0f; --panel: #1c1c1c; --line: #303030; --text: #f1f1f1; --muted: #9a9a9a; --ball: #d6f23a; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.45 Roboto, system-ui, sans-serif; }
+    header { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+    header h1 { margin: 0; font-size: 15px; font-weight: 500; }
+    header a { margin-left: auto; color: var(--ball); }
+    main { padding: 16px; max-width: 1100px; }
+    ytd-app { display: block; }
+    ytd-watch-flexy { display: block; }
+    #player-wrap { width: 100%; max-width: 860px; transition: max-width 0.2s; }
+    ytd-watch-flexy[theater] #player-wrap { max-width: none; }
+    ytd-app[miniplayer-is-active] #player-wrap { position: fixed; right: 16px; bottom: 16px; width: 400px; z-index: 5; }
+    /* Mimics YouTube: the player is positioned, the video container is too, video uses object-fit contain. */
+    #movie_player { position: relative; width: 100%; aspect-ratio: 16 / 9; background: #000; overflow: hidden; }
+    .html5-video-container { position: relative; width: 100%; height: 100%; z-index: 10; }
+    video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+    .ytp-chrome-bottom {
+      position: absolute; left: 12px; right: 12px; bottom: 0; height: 48px; z-index: 59;
+      display: flex; align-items: center; gap: 12px; color: #fff; transition: opacity 0.25s;
+      background: linear-gradient(transparent, rgba(0,0,0,0.6));
+    }
+    .ytp-autohide .ytp-chrome-bottom { opacity: 0; }
+    .ytp-chrome-bottom button { width: 36px; height: 36px; border: 0; background: none; color: #fff; cursor: pointer; font-size: 18px; }
+    .ytp-progress { flex: 1; height: 3px; background: rgba(255,255,255,0.3); }
+    .ytp-progress i { display: block; height: 100%; width: 0; background: #f00; }
+    #movie_player.ad-showing::before { content: "Ad"; position: absolute; left: 12px; top: 12px; z-index: 70; padding: 2px 8px; border-radius: 4px; background: #fc0; color: #000; font-weight: 500; }
+    .tools { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0; }
+    .tools button { height: 30px; padding: 0 12px; border: 0; border-radius: 15px; background: #2e2e2e; color: inherit; font: inherit; cursor: pointer; }
+    .tools button:hover { background: #3d3d3d; }
+    :focus-visible { outline: 2px solid var(--ball); outline-offset: 2px; }
+    pre { margin: 0; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); white-space: pre-wrap; font-size: 12px; }
+    .muted { color: var(--muted); }
+  </style>
+</head>
+<body>
+  <header>
+    <img src="../icons/icon32.png" width="20" height="20" alt="">
+    <h1>Page sim</h1>
+    <a href="harness.html">Overlay harness</a>
+  </header>
+  <ytd-app>
+    <main>
+      <p class="muted">Fake YouTube watch page running the extension's app.js against the service at <code id="api"></code>. Video id comes from <code>?v=</code>; clips play the synthetic video with offset 100.</p>
+      <ytd-watch-flexy>
+        <div id="player-wrap">
+          <div id="movie_player" class="html5-video-player">
+            <div class="html5-video-container">
+              <video class="html5-main-video" muted playsinline loop preload="auto"></video>
+            </div>
+            <div class="ytp-chrome-bottom">
+              <button type="button" id="yt-play" aria-label="Play (k)">▶</button>
+              <div class="ytp-progress"><i id="yt-prog"></i></div>
+              <button type="button" aria-label="Settings">⚙</button>
+              <button type="button" id="yt-full" aria-label="Full screen (f)">⛶</button>
+            </div>
+          </div>
+        </div>
+      </ytd-watch-flexy>
+      <div class="tools">
+        <button type="button" data-nav="SYNTHETIC00">Go to SYNTHETIC00</button>
+        <button type="button" data-nav="UNTRACKED01">Go to UNTRACKED01</button>
+        <button type="button" data-nav="FAILFAILFAI">Go to FAILFAILFAI</button>
+        <button type="button" id="replace">Replace video element</button>
+        <button type="button" id="ad">Toggle ad</button>
+        <button type="button" id="mini">Toggle miniplayer</button>
+        <button type="button" id="theater">Toggle theater</button>
+        <button type="button" id="autohide">Toggle autohide</button>
+        <button type="button" id="undismiss">Forget dismissals</button>
+      </div>
+      <pre id="state" aria-live="off"></pre>
+      <p class="muted">Hotkeys seen by the page (should stay empty while typing in the prompt): <code id="keys"></code></p>
+    </main>
+  </ytd-app>
+  <script type="module" src="sim.js"></script>
+</body>
+</html>

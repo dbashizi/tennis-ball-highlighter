@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="color-scheme" content="dark">
+  <title>Tennis Ball Highlighter</title>
+  <link rel="stylesheet" href="popup.css">
+  <script type="module" src="popup.js"></script>
+</head>
+<body>
+  <header class="top">
+    <img src="../icons/icon32.png" width="24" height="24" alt="">
+    <h1>Ball highlighter</h1>
+    <label class="switch" title="Show the ring">
+      <input type="checkbox" id="enabled" role="switch">
+      <span aria-hidden="true"></span>
+      <span class="sr">Show the ring</span>
+    </label>
+  </header>
+
+  <main>
+    <section class="video" id="video" aria-live="polite">
+      <p class="lead" id="v-lead">Checking this tab…</p>
+      <p class="sub" id="v-sub" hidden></p>
+
+      <div class="progress" id="v-progress" hidden>
+        <div class="row"><span id="p-stage"></span><span class="pct" id="p-pct"></span></div>
+        <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-label="Tracking progress"><i id="p-bar"></i></div>
+      </div>
+
+      <div class="start" id="v-start" hidden>
+        <p class="sub">Start it in the project folder:</p>
+        <div class="cmd">
+          <code id="cmd">uv run tbh-service run</code>
+          <button type="button" class="icon-btn" id="copy" aria-label="Copy command" title="Copy command">
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><rect x="8" y="8" width="11" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M5 15V6a2 2 0 0 1 2-2h8" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
+          </button>
+        </div>
+        <p class="sub small">It listens on 127.0.0.1:8765.</p>
+      </div>
+
+      <div class="actions" id="v-actions"></div>
+    </section>
+
+    <section class="settings" aria-labelledby="settings-h">
+      <h2 id="settings-h">Ring</h2>
+
+      <fieldset class="field seg" aria-describedby="shape-help">
+        <legend>Ring shape</legend>
+        <div class="seg-row">
+          <label><input type="radio" name="shape" value="stadium"><span>Follow streak</span></label>
+          <label><input type="radio" name="shape" value="circle"><span>Circle only</span></label>
+        </div>
+        <p class="help" id="shape-help">Follow streak outlines a motion-blurred ball. A circle can cover part of the streak.</p>
+      </fieldset>
+
+      <div class="field">
+        <div class="label-row">
+          <label for="ratio">Ring size</label>
+          <output id="ratio-out" for="ratio"></output>
+        </div>
+        <input type="range" id="ratio" min="1.1" max="1.5" step="0.05" aria-describedby="ratio-help">
+        <p class="help" id="ratio-help">How far the ring's outer edge sits from the ball, as a multiple of its radius.</p>
+      </div>
+
+      <div class="field">
+        <div class="label-row">
+          <label for="minStroke">Minimum ring width</label>
+          <output id="minStroke-out" for="minStroke"></output>
+        </div>
+        <input type="range" id="minStroke" min="0.5" max="4" step="0.25">
+      </div>
+
+      <div class="field">
+        <div class="label-row">
+          <label for="minConf">Hide below confidence</label>
+          <output id="minConf-out" for="minConf"></output>
+        </div>
+        <input type="range" id="minConf" min="0" max="1" step="0.05" aria-describedby="minConf-help">
+        <p class="help" id="minConf-help">Higher hides more uncertain positions.</p>
+      </div>
+
+      <label class="check">
+        <input type="checkbox" id="autoOffer">
+        <span>Offer tracking on untracked videos</span>
+      </label>
+      <label class="check">
+        <input type="checkbox" id="debug">
+        <span>Show debug info on the video</span>
+      </label>
+
+      <button type="button" class="link" id="reset">Reset to defaults</button>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <span class="dot" id="svc-dot" aria-hidden="true"></span>
+    <span id="svc-text">Checking the helper service…</span>
+  </footer>
+</body>
+</html>

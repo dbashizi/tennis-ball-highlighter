@@ -1,0 +1,58 @@
+{
+  "manifest_version": 3,
+  "name": "Tennis Ball Highlighter",
+  "short_name": "Ball Highlighter",
+  "version": "0.1.0",
+  "description": "Draws a contrast-adaptive ring around the ball in old tennis matches on YouTube, using tracking data from a local helper service.",
+  "minimum_chrome_version": "116",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "Tennis Ball Highlighter",
+    "default_popup": "src/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png"
+    }
+  },
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
+  "permissions": ["storage"],
+  "host_permissions": [
+    "http://127.0.0.1:8765/*",
+    "https://www.youtube.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://www.youtube.com/*"],
+      "js": ["src/content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "src/content-main.js",
+        "src/app.js",
+        "src/overlay.js",
+        "src/prompt.js",
+        "src/track.js",
+        "src/geometry.js",
+        "src/settings.js",
+        "src/client.js"
+      ],
+      "matches": ["https://www.youtube.com/*"]
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' http://127.0.0.1:8765"
+  }
+}
