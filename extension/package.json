@@ -1,0 +1,9 @@
+{
+  "name": "tennis-ball-highlighter-extension",
+  "private": true,
+  "type": "module",
+  "description": "No build step. package.json only marks the sources as ES modules for `node --test`.",
+  "scripts": {
+    "test": "node --test \"test/*.test.js\""
+  }
+}
